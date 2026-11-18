@@ -1,4 +1,4 @@
-# NutriTrack 6.1
+# NutriTrack 6.2
 
 A private nutrition tracker for iPhone, built as a Progressive Web App (PWA). It also opens in Edge or Chrome on Windows.
 
@@ -50,6 +50,32 @@ Total recurring cost: **$0**. You don't need an Apple Developer account, a paid 
 **Added in 6.0:** a health profile with conditions and a full medication list (statuses: taking, confirm, stopped); personalized guidance based on your medications, conditions, blood pressure and labs (for example: BP medicines and weight loss, avoiding potassium salt substitutes on losartan, hydration with a diuretic plus Wegovy, exercise effort on a beta-blocker, B12 with metformin); a blood pressure log with ACC/AHA categories, chart and safety prompts; lab results with common reference ranges and trends; targets that account for your conditions (sodium for high blood pressure, protein for kidney disease); health context added to recaps; meds, BP and labs added to the provider report.
 
 **Added in 6.1:** better food search. USDA brand-name foods are now included, and all sources are merged into one “Best matches” list ranked by how many of your words match the name and brand, with duplicates removed.
+
+**Added in 6.2:** optional fatsecret restaurant and brand database (2.3M+ foods; free Basic tier) through your own private relay. Every serving size it lists becomes a unit you can pick. Attribution: “Powered by fatsecret”.
+
+## Connect fatsecret (free, about 15 minutes, works from iPhone)
+
+Why a relay? fatsecret needs a secret key that must not live in a public app. The relay is a few lines of code on Cloudflare's free plan that holds your key and only answers your NutriTrack.
+
+**A. fatsecret key**
+1. Go to platform.fatsecret.com → **Sign up** (choose the free **Basic** edition) and confirm your email.
+2. Sign in → **Generate / View API Keys**. Copy your **Consumer Key** and **Consumer Secret** (the OAuth 1.0 pair).
+
+**B. Cloudflare relay**
+1. Go to dash.cloudflare.com and sign up (free). In Safari, tap **aA → Request Desktop Website**.
+2. **Workers & Pages → Create → Create Worker**. Name it `nutritrack-food`, then tap **Deploy**.
+3. Tap **Edit code**, delete everything, paste the contents of `nutritrack-food-worker.js`, then tap **Deploy**.
+4. Go to **Settings → Variables and Secrets** and add:
+   - `FS_KEY`: type **Secret**, your Consumer Key
+   - `FS_SECRET`: type **Secret**, your Consumer Secret
+   - `ALLOW_ORIGIN`: type **Text**, `https://jrichmtz.github.io`
+   - `APP_TOKEN`: type **Secret**, any long phrase you make up (optional, recommended)
+5. Open the worker's address (`https://nutritrack-food.<you>.workers.dev`) in Safari. You should see `"configured":true`.
+
+**C. NutriTrack**
+Go to **Settings → Food search**, paste the worker address and your app token, then tap **Test connection**.
+
+Costs: $0. fatsecret Basic is free (attribution required). Cloudflare Workers' free plan allows far more requests per day than you need.
 
 **Planned (optional, later)**: automatic sync between iPhone and Windows through a private free-tier server; AI meal-photo recognition (paid, only with your approval).
 

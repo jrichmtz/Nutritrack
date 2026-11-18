@@ -4,7 +4,7 @@
   Local-first PWA: all personal data lives in this device's IndexedDB.
   Only barcode numbers / search words leave the device (sent to Open Food Facts).
 */
-const APP_VERSION = '6.1.0';
+const APP_VERSION = '6.2.0';
 
 // ---------- Constants ----------
 const NUTS = [
@@ -1097,10 +1097,10 @@ async function openAddFood(opts = {}) {
       <button class="btn secondary" data-act="recipe">New recipe</button></div>
     <button class="btn block" style="margin-bottom:10px" data-act="meal">Meal photo</button>`);
   const listEl = $('#af-list', el), q = $('#af-q', el);
-  const row = (f) => { const tag = foods.includes(f) ? '' : /^USDA/.test(f.source || '') ? 'USDA' : /Open Food Facts/.test(f.source || '') ? 'OFF' : ''; return `<li><button class="item" data-food="${f.id}">${thumb(f.imageUrl)}<div class="grow"><div class="t">${f.favorite ? '★ ' : ''}${esc(f.name)}</div>
+  const row = (f) => { const tag = foods.includes(f) ? '' : /^USDA/.test(f.source || '') ? 'USDA' : /Open Food Facts/.test(f.source || '') ? 'OFF' : /^fatsecret/.test(f.source || '') ? 'FS' : ''; return `<li><button class="item" data-food="${f.id}">${thumb(f.imageUrl)}<div class="grow"><div class="t">${f.favorite ? '★ ' : ''}${esc(f.name)}</div>
     <div class="s">${/restaurant/.test(f.source || '') ? '🍴 ' : ''}${esc([f.brand, f.servingLabel].filter(Boolean).join(' · '))}${tag ? ` <span class="src">${tag}</span>` : ''}${f.incomplete ? ' · <span style="color:var(--orange)">incomplete</span>' : ''}</div></div>
     <div class="v small">${(() => { const n = canUseServing(f) ? calcNutrients(f, 1, 'serving') : calcNutrients(f, 100, 'g'); return n.kcal == null ? '' : fmt(n.kcal) + '<span class="tiny muted"> kcal</span>'; })()}</div></button></li>`; };
-  let online = { usda: null, off: null, err: {} }, lastQ = '', timer = null, pool = [];
+  let online = { usda: null, off: null, fs: fsOn() ? null : [], err: {} }, lastQ = '', timer = null, pool = [];
   const sec = (title, items, note) => `<div class="card"><div class="spread"><h2 style="margin:0">${title}</h2>${note ? `<span class="tiny muted">${note}</span>` : ''}</div><ul class="list" style="margin-top:6px">${items}</ul></div>`;
   function draw() {
     const s = q.value.trim().toLowerCase();
@@ -1116,23 +1116,26 @@ async function openAddFood(opts = {}) {
       pool = foods; listEl.innerHTML = html; return;
     }
     const mine = foods.filter(f => matchScore(s, f) >= 50 || String(f.barcode || '').includes(s)).sort((a, b) => matchScore(s, b) - matchScore(s, a) || (b.useCount || 0) - (a.useCount || 0)).slice(0, 20);
-    pool = [...foods, ...(online.usda || []), ...(online.off || [])];
+    pool = [...foods, ...(online.usda || []), ...(online.off || []), ...(online.fs || [])];
     if (mine.length) html += sec('My foods', mine.map(f => row(f)).join(''));
     const st = k => online.err[k] ? `<li class="small" style="padding:10px 0; color:var(--red)">${esc(online.err[k])}</li>` : online[k] == null ? '<li class="small muted" style="padding:10px 0">Searching…</li>' : online[k].length ? online[k].map(f => row(f)).join('') : '<li class="small muted" style="padding:10px 0">No results.</li>';
     if (s.length >= 2) {
-      const loading = online.usda == null || online.off == null;
-      const ranked = rankResults(q.value.trim(), [...(online.usda || []), ...(online.off || [])]);
+      const loading = online.usda == null || online.off == null || online.fs == null;
+      const ranked = rankResults(q.value.trim(), [...(online.fs || []), ...(online.usda || []), ...(online.off || [])]);
       const errs = Object.values(online.err).filter(x => x && x.trim());
       const body = ranked.length ? ranked.map(f => row(f)).join('') + (loading ? '<li class="small muted" style="padding:10px 0">Still searching…</li>' : '')
         : loading ? '<li class="small muted" style="padding:10px 0">Searching…</li>' : '<li class="small muted" style="padding:10px 0">No matches. Try fewer words (e.g. “chobani creamer”), scan the barcode, or use Quick add.</li>';
-      html += sec('Best matches', body + errs.map(e => `<li class="small" style="padding:8px 0; color:var(--red)">${esc(e)}</li>`).join(''), 'USDA + Open Food Facts');
+      html += sec('Best matches', body + errs.map(e => `<li class="small" style="padding:8px 0; color:var(--red)">${esc(e)}</li>`).join(''), fsOn() ? 'fatsecret + USDA + OFF' : 'USDA + Open Food Facts');
+      if (fsOn()) html += '<p class="tiny muted" style="margin:-6px 4px 12px">Restaurant & brand data <a href="https://www.fatsecret.com" target="_blank" rel="noopener" style="color:var(--accent)">Powered by fatsecret</a></p>';
+      else html += '<p class="tiny muted" style="margin:-6px 4px 12px">Want more restaurants & brands? Connect the free fatsecret database in Settings → Food search.</p>';
     }
     html += `<div class="card"><button class="item" data-act="quickcal"><div class="ai2">⚡</div><div class="grow"><div class="t">Quick add “${esc(q.value.trim())}”</div><div class="s">Restaurant or homemade? Type the calories — many chains post nutrition on their website</div></div></button></div>`;
     listEl.innerHTML = html;
   }
   async function runOnline(term) {
     if (term.length < 2 || term === lastQ) return;
-    lastQ = term; online = { usda: null, off: null, err: {} }; draw();
+    lastQ = term; online = { usda: null, off: null, fs: fsOn() ? null : [], err: {} }; draw();
+    if (fsOn()) searchFatSecret(term).then(r => { if (lastQ === term) { online.fs = r; draw(); } }).catch(e => { if (lastQ === term) { online.err.fs = e.message; online.fs = []; draw(); } });
     if (!navigator.onLine) { online.err = { usda: 'You’re offline — showing your saved foods only.', off: ' ' }; online.usda = []; online.off = []; draw(); return; }
     searchUSDA(term).then(r => { if (lastQ === term) { online.usda = r; draw(); } }).catch(e => { if (lastQ === term) { online.err.usda = e.message; online.usda = []; draw(); } });
     searchOFF(term).then(r => { if (lastQ === term) { online.off = r; draw(); } }).catch(e => { if (lastQ === term) { online.err.off = e.message; online.off = []; draw(); } });
@@ -1145,8 +1148,9 @@ async function openAddFood(opts = {}) {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.food) {
       let f = pool.find(x => x.id === b.dataset.food); if (!f) return;
+      if (f.fsPartial) { toast('Loading serving sizes…', 4000); f = await fsComplete(f); $('#toast').hidden = true; }
       if (!foods.includes(f)) {
-        const dup = foods.find(x => (f.fdcId && x.fdcId === f.fdcId) || (f.barcode && x.barcode === f.barcode));
+        const dup = foods.find(x => (f.fdcId && x.fdcId === f.fdcId) || (f.fsId && x.fsId === f.fsId) || (f.barcode && x.barcode === f.barcode));
         if (dup) f = dup; else { await DB.put('foods', f); foods.push(f); }
       }
       openLogSheet(f, { ...opts, meal }); return;
@@ -1164,6 +1168,61 @@ async function openAddFood(opts = {}) {
       closeAllSheets(); toast(`Added to ${MEAL_LABEL[m]}`); render();
     }, q.value.trim());
   };
+}
+
+
+// ---------- fatsecret (restaurant + brand foods) via your private relay ----------
+const fsOn = () => !!(state.settings.fsUrl || '').trim();
+async function fsGet(path) {
+  const base = state.settings.fsUrl.trim().replace(/\/+$/, '');
+  const h = { Accept: 'application/json' }; if ((state.settings.fsToken || '').trim()) h['X-App-Token'] = state.settings.fsToken.trim();
+  let r; try { r = await fetch(base + path, { headers: h }); } catch (e) { throw new Error('Couldn’t reach your restaurant & brand relay.'); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error('Restaurant & brand search: ' + ((j.error && (j.error.message || j.error)) || r.status));
+  return j;
+}
+const arr = x => x == null ? [] : Array.isArray(x) ? x : [x];
+// "Per 1 cup - Calories: 186kcal | Fat: 9.95g | Carbs: 12.04g | Protein: 11.38g"
+function parseFsDesc(d) {
+  const m = String(d || '').match(/^Per\s+(.+?)\s+-\s+(.*)$/i); if (!m) return null;
+  const g = k => { const x = m[2].match(new RegExp(k + ':\\s*([\\d.]+)', 'i')); return x ? num(x[1]) : null; };
+  const n = emptyNuts(); n.kcal = g('Calories'); n.fat = g('Fat'); n.carbs = g('Carbs'); n.protein = g('Protein');
+  return { per: m[1].trim(), n };
+}
+function mapFsSearch(x) {
+  const d = parseFsDesc(x.food_description); if (!d || d.n.kcal == null) return null;
+  const per100 = /^100\s*(g|ml)$/i.test(d.per);
+  const f = { id: uid(), fsId: String(x.food_id), fsPartial: true, name: x.food_name, brand: x.brand_name || '', servingLabel: per100 ? '' : d.per, servingGrams: null,
+    baseUnit: /ml$/i.test(d.per) ? 'ml' : 'g', per100: per100 ? d.n : null, perServing: per100 ? null : d.n, imageUrl: '',
+    source: x.food_type === 'Brand' ? 'fatsecret · brand' : 'fatsecret', favorite: false, useCount: 0, lastUsed: 0, createdAt: Date.now() };
+  f.incomplete = isIncomplete(f);
+  return f;
+}
+async function searchFatSecret(q) {
+  const j = await fsGet('/search?q=' + encodeURIComponent(q));
+  return arr(j.foods && j.foods.food).map(mapFsSearch).filter(Boolean);
+}
+// Full record: every serving size fatsecret lists becomes a unit you can pick (e.g. "1 sandwich", "1 cup", "100 g").
+function mapFsFood(x, base) {
+  const sv = arr(x.servings && x.servings.serving);
+  const nOf = s => { const n = emptyNuts(); n.kcal = num(s.calories); n.protein = num(s.protein); n.carbs = num(s.carbohydrate); n.fat = num(s.fat); n.satfat = num(s.saturated_fat);
+    n.fiber = num(s.fiber); n.sugar = num(s.sugar); n.addedSugar = num(s.added_sugars); n.sodium = num(s.sodium); return n; };
+  const metric = s => { const a = num(s.metric_serving_amount), u = String(s.metric_serving_unit || '').toLowerCase(); if (!a) return null; return u === 'g' || u === 'ml' ? { g: a, u } : u === 'oz' ? { g: a * 28.35, u: 'g' } : null; };
+  const def = sv.find(s => String(s.is_default) === '1') || sv[0];
+  if (!def) return base;
+  const dm = metric(def), withM = sv.find(s => metric(s) && num(s.calories) != null);
+  const f = { ...base, fsPartial: false, name: x.food_name || base.name, brand: x.brand_name || base.brand || '',
+    servingLabel: def.serving_description || base.servingLabel, servingGrams: dm ? dm.g : null, baseUnit: dm ? dm.u : (withM ? metric(withM).u : 'g'),
+    perServing: nOf(def), per100: null,
+    portions: sv.filter(s => s !== def && metric(s) && !/^100\s*(g|ml)$/i.test(s.serving_description || '')).map(s => ({ label: s.serving_description, g: metric(s).g })) };
+  if (withM) { const m = metric(withM), n = nOf(withM); f.per100 = Object.fromEntries(NUTS.map(([k]) => [k, n[k] == null ? null : n[k] / m.g * 100])); }
+  f.incomplete = isIncomplete(f);
+  return f;
+}
+async function fsComplete(f) {
+  if (!f.fsPartial) return f;
+  try { const j = await fsGet('/food?id=' + encodeURIComponent(f.fsId)); return j.food ? mapFsFood(j.food, f) : f; }
+  catch (e) { toast(e.message, 3500); return f; }
 }
 
 // ---------- USDA FoodData Central (free, government-verified) ----------
@@ -1226,7 +1285,8 @@ function matchScore(q, f) {
   if (cov === 1) sc += 25;
   if (words.some(w => brand.includes(w))) sc += 10;
   if (name.startsWith(words[0])) sc += 5;
-  if (cov === 1 && words.length <= 2 && /^USDA($| ·)/.test(f.source || '')) sc += 8; // plain "egg" → generic egg first
+  if (cov === 1 && words.length <= 2 && (/^USDA($| ·)/.test(f.source || '') || f.source === 'fatsecret')) sc += 8;
+  if (/^fatsecret/.test(f.source || '')) sc += 3; // curated restaurant & brand data // plain "egg" → generic egg first
   if (f.incomplete) sc -= 6;
   sc -= Math.min(15, name.length / 12);
   return sc;
@@ -2628,6 +2688,11 @@ async function openSettings() {
     <p class="small muted">Plain-food and restaurant search uses the USDA database. It works with a shared free key; for unlimited everyday use, get your own free key at <b>api.data.gov/signup</b> (takes a minute — it’s emailed to you) and paste it here. It stays on this phone.</p>
     <input class="in" id="usda-key" placeholder="USDA API key (optional)" value="${esc(s.usdaKey || '')}" autocomplete="off" autocapitalize="off" spellcheck="false">
     <div class="stack"><button class="btn secondary" data-act="save-key">Save key</button></div>
+    <label class="f" style="margin-top:18px">Restaurant & brand database (fatsecret)</label>
+    <p class="small muted" style="margin-top:0">Optional, free. Adds a much larger restaurant and brand-name database through your own private relay. See the setup guide in the README, or ask Claude to walk you through it.</p>
+    <input class="in" id="fs-url" placeholder="Relay address, e.g. https://nutritrack-food.yourname.workers.dev" value="${esc(s.fsUrl || '')}" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <input class="in" id="fs-token" style="margin-top:8px" placeholder="App token (if you set one)" value="${esc(s.fsToken || '')}" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="row" style="margin-top:10px"><button class="btn secondary" style="flex:1" data-act="save-fs">Save</button><button class="btn" style="flex:1" data-act="test-fs">Test connection</button></div>
     <h3>Backup &amp; restore</h3>
     <p class="small muted">Last backup: ${lb ? new Date(lb).toLocaleString() : 'never'}. Backups are encrypted with your passphrase (AES-256) before they leave the app. Save them to OneDrive from the share sheet, and use Restore to move your data to another device, like your Windows PC.</p>
     <div class="stack"><button class="btn secondary" data-act="backup">Create encrypted backup</button>
@@ -2650,6 +2715,13 @@ async function openSettings() {
     else if (a === 'save-goals') {
       $$('[data-goal]', el).forEach(i => { const k = i.dataset.goal, v = num(i.value); if (k === 'goalWeight' || k === 'startWeight' || k === 'heightIn') state.settings[k] = v != null && v > 0 ? v : null; else if (v != null && v >= 0) state.settings[k] = v; });
       await DB.put('kv', state.settings); toast('Goals saved'); render();
+    } else if (a === 'save-fs' || a === 'test-fs') {
+      state.settings.fsUrl = $('#fs-url', el).value.trim(); state.settings.fsToken = $('#fs-token', el).value.trim(); await DB.put('kv', state.settings);
+      if (a === 'save-fs') { toast('Saved'); return; }
+      if (!state.settings.fsUrl) { toast('Enter your relay address first'); return; }
+      toast('Testing…', 6000);
+      try { const r = await searchFatSecret('big mac'); toast(r.length ? `Connected ✓ — found ${r.length} results for “big mac”` : 'Connected, but no results came back', 4000); }
+      catch (err) { toast(err.message, 5000); }
     } else if (a === 'save-key') { state.settings.usdaKey = $('#usda-key', el).value.trim(); await DB.put('kv', state.settings); toast('Key saved'); }
     else if (a === 'backup') doBackup();
     else if (a === 'restore') doRestore();
@@ -2676,4 +2748,4 @@ async function init() {
 }
 
 if (typeof document !== 'undefined' && document.getElementById('view')) init();
-if (typeof module !== 'undefined') module.exports = { matchScore, rankResults, bpCategory, labFlag, unitOptions, amountLabel, recommendTargets, checkinSuggestion, medLevelSeries, doseMg, mapUSDA, niceName, trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
+if (typeof module !== 'undefined') module.exports = { parseFsDesc, mapFsSearch, mapFsFood, matchScore, rankResults, bpCategory, labFlag, unitOptions, amountLabel, recommendTargets, checkinSuggestion, medLevelSeries, doseMg, mapUSDA, niceName, trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
