@@ -4,7 +4,7 @@
   Local-first PWA: all personal data lives in this device's IndexedDB.
   Only barcode numbers / search words leave the device (sent to Open Food Facts).
 */
-const APP_VERSION = '6.0.0';
+const APP_VERSION = '6.1.0';
 
 // ---------- Constants ----------
 const NUTS = [
@@ -207,11 +207,11 @@ async function lookupOFF(code) {
 async function searchOFF(q) {
   // Newer Open Food Facts search service first, classic search as a fallback.
   try {
-    const r = await fetch(`https://search.openfoodfacts.org/search?q=${encodeURIComponent(q)}&page_size=15&fields=${OFF_FIELDS}`, { headers: { Accept: 'application/json' } });
+    const r = await fetch(`https://search.openfoodfacts.org/search?q=${encodeURIComponent(q)}&page_size=30&fields=${OFF_FIELDS}`, { headers: { Accept: 'application/json' } });
     if (r.ok) { const j = await r.json(); const hits = (j.hits || []).filter(p => p.code && p.nutriments); if (hits.length) return hits.map(p => mapOFF(p.code, p)); }
   } catch (e) { /* fall through */ }
   let r;
-  try { r = await fetch(`${OFF_BASE}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=15&fields=${OFF_FIELDS}`); }
+  try { r = await fetch(`${OFF_BASE}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=30&fields=${OFF_FIELDS}`); }
   catch (e) { throw new Error('Brand search is unavailable right now. Try scanning the barcode instead.'); }
   if (r.status === 429) throw new Error('Brand search is limited to about 10 per minute. Try again shortly.');
   if (!r.ok) throw new Error('Brand search failed (' + r.status + ')');
@@ -1097,9 +1097,9 @@ async function openAddFood(opts = {}) {
       <button class="btn secondary" data-act="recipe">New recipe</button></div>
     <button class="btn block" style="margin-bottom:10px" data-act="meal">Meal photo</button>`);
   const listEl = $('#af-list', el), q = $('#af-q', el);
-  const row = (f, tag) => `<li><button class="item" data-food="${f.id}">${thumb(f.imageUrl)}<div class="grow"><div class="t">${f.favorite ? '★ ' : ''}${esc(f.name)}</div>
-    <div class="s">${/restaurant/.test(f.source || '') ? '🍴 ' : ''}${esc([f.brand, f.servingLabel].filter(Boolean).join(' · '))}${f.incomplete ? ' · <span style="color:var(--orange)">incomplete</span>' : ''}</div></div>
-    <div class="v small">${(() => { const n = canUseServing(f) ? calcNutrients(f, 1, 'serving') : calcNutrients(f, 100, 'g'); return n.kcal == null ? '' : fmt(n.kcal) + '<span class="tiny muted"> kcal</span>'; })()}</div></button></li>`;
+  const row = (f) => { const tag = foods.includes(f) ? '' : /^USDA/.test(f.source || '') ? 'USDA' : /Open Food Facts/.test(f.source || '') ? 'OFF' : ''; return `<li><button class="item" data-food="${f.id}">${thumb(f.imageUrl)}<div class="grow"><div class="t">${f.favorite ? '★ ' : ''}${esc(f.name)}</div>
+    <div class="s">${/restaurant/.test(f.source || '') ? '🍴 ' : ''}${esc([f.brand, f.servingLabel].filter(Boolean).join(' · '))}${tag ? ` <span class="src">${tag}</span>` : ''}${f.incomplete ? ' · <span style="color:var(--orange)">incomplete</span>' : ''}</div></div>
+    <div class="v small">${(() => { const n = canUseServing(f) ? calcNutrients(f, 1, 'serving') : calcNutrients(f, 100, 'g'); return n.kcal == null ? '' : fmt(n.kcal) + '<span class="tiny muted"> kcal</span>'; })()}</div></button></li>`; };
   let online = { usda: null, off: null, err: {} }, lastQ = '', timer = null, pool = [];
   const sec = (title, items, note) => `<div class="card"><div class="spread"><h2 style="margin:0">${title}</h2>${note ? `<span class="tiny muted">${note}</span>` : ''}</div><ul class="list" style="margin-top:6px">${items}</ul></div>`;
   function draw() {
@@ -1115,13 +1115,17 @@ async function openAddFood(opts = {}) {
       if (recs.length) html += sec('Recipes', recs.map(f => row(f)).join(''));
       pool = foods; listEl.innerHTML = html; return;
     }
-    const mine = foods.filter(f => [f.name, f.brand, f.barcode].some(x => String(x || '').toLowerCase().includes(s))).sort((a, b) => (b.useCount || 0) - (a.useCount || 0)).slice(0, 20);
+    const mine = foods.filter(f => matchScore(s, f) >= 50 || String(f.barcode || '').includes(s)).sort((a, b) => matchScore(s, b) - matchScore(s, a) || (b.useCount || 0) - (a.useCount || 0)).slice(0, 20);
     pool = [...foods, ...(online.usda || []), ...(online.off || [])];
     if (mine.length) html += sec('My foods', mine.map(f => row(f)).join(''));
     const st = k => online.err[k] ? `<li class="small" style="padding:10px 0; color:var(--red)">${esc(online.err[k])}</li>` : online[k] == null ? '<li class="small muted" style="padding:10px 0">Searching…</li>' : online[k].length ? online[k].map(f => row(f)).join('') : '<li class="small muted" style="padding:10px 0">No results.</li>';
     if (s.length >= 2) {
-      html += sec('Common &amp; restaurant foods', st('usda'), 'USDA');
-      html += sec('Brands &amp; products', st('off'), 'Open Food Facts');
+      const loading = online.usda == null || online.off == null;
+      const ranked = rankResults(q.value.trim(), [...(online.usda || []), ...(online.off || [])]);
+      const errs = Object.values(online.err).filter(x => x && x.trim());
+      const body = ranked.length ? ranked.map(f => row(f)).join('') + (loading ? '<li class="small muted" style="padding:10px 0">Still searching…</li>' : '')
+        : loading ? '<li class="small muted" style="padding:10px 0">Searching…</li>' : '<li class="small muted" style="padding:10px 0">No matches. Try fewer words (e.g. “chobani creamer”), scan the barcode, or use Quick add.</li>';
+      html += sec('Best matches', body + errs.map(e => `<li class="small" style="padding:8px 0; color:var(--red)">${esc(e)}</li>`).join(''), 'USDA + Open Food Facts');
     }
     html += `<div class="card"><button class="item" data-act="quickcal"><div class="ai2">⚡</div><div class="grow"><div class="t">Quick add “${esc(q.value.trim())}”</div><div class="s">Restaurant or homemade? Type the calories — many chains post nutrition on their website</div></div></button></div>`;
     listEl.innerHTML = html;
@@ -1194,16 +1198,47 @@ function mapUSDA(x) {
   f.incomplete = isIncomplete(f);
   return f;
 }
-async function searchUSDA(q) {
+async function usdaFetch(q, types, size) {
   const key = (state.settings.usdaKey || '').trim() || 'DEMO_KEY';
-  const types = encodeURIComponent('Foundation,SR Legacy,Survey (FNDDS)');
-  const u = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=15&dataType=${types}`;
+  const u = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=${size}&dataType=${encodeURIComponent(types)}`;
   let r;
   try { r = await fetch(u, { headers: { Accept: 'application/json' } }); } catch (e) { throw new Error('Couldn’t reach the USDA food database. Check your connection.'); }
-  if (r.status === 429 || r.status === 403) throw new Error(key === 'DEMO_KEY' ? 'The shared free USDA limit was reached. Get your own free key (Settings → USDA key) for unlimited everyday use.' : 'USDA key not accepted or limit reached — check it in Settings.');
+  if (r.status === 429 || r.status === 403) throw new Error(key === 'DEMO_KEY' ? 'The shared free USDA limit was reached. Get your own free key (Settings → Food search) for unlimited everyday use.' : 'USDA key not accepted or limit reached — check it in Settings.');
   if (!r.ok) throw new Error('USDA search failed (' + r.status + ')');
   const j = await r.json();
   return (j.foods || []).map(mapUSDA).filter(f => f.per100);
+}
+// Plain foods and restaurant items, plus the USDA brand-name database (Chobani, Kraft, etc.)
+async function searchUSDA(q) {
+  const [gen, br] = await Promise.allSettled([usdaFetch(q, 'Foundation,SR Legacy,Survey (FNDDS)', 12), usdaFetch(q, 'Branded', 30)]);
+  if (gen.status === 'rejected' && br.status === 'rejected') throw gen.reason;
+  return [...(gen.value || []), ...(br.value || [])];
+}
+// Relevance: how many of your words appear in the name + brand, favoring full matches and brand matches.
+const STOP = new Set(['with', 'and', 'the', 'of', 'a', 'an', 'in', 'or', 'for']);
+function matchScore(q, f) {
+  const words = String(q).toLowerCase().split(/[^a-z0-9%]+/).filter(w => w.length > 1 && !STOP.has(w));
+  if (!words.length) return 0;
+  const name = String(f.name || '').toLowerCase(), brand = String(f.brand || '').toLowerCase(), text = name + ' ' + brand;
+  const has = w => text.includes(w) || (w.endsWith('s') && text.includes(w.slice(0, -1))) || text.includes(w + 's');
+  const hit = words.filter(has).length, cov = hit / words.length;
+  let sc = cov * 100;
+  if (cov === 1) sc += 25;
+  if (words.some(w => brand.includes(w))) sc += 10;
+  if (name.startsWith(words[0])) sc += 5;
+  if (cov === 1 && words.length <= 2 && /^USDA($| ·)/.test(f.source || '')) sc += 8; // plain "egg" → generic egg first
+  if (f.incomplete) sc -= 6;
+  sc -= Math.min(15, name.length / 12);
+  return sc;
+}
+function rankResults(q, list) {
+  const seen = new Set(), out = [];
+  for (const f of list.map(f => ({ f, s: matchScore(q, f) })).sort((a, b) => b.s - a.s)) {
+    const key = (f.f.barcode && f.f.barcode.replace(/^0+/, '')) || (f.f.name + '|' + f.f.brand).toLowerCase();
+    if (seen.has(key)) continue; seen.add(key); out.push(f);
+  }
+  const best = out.length ? out[0].s : 0;
+  return out.filter(x => x.s >= Math.min(60, best - 45)).slice(0, 25).map(x => x.f);
 }
 
 // ---------- Phase 2: label photo + OCR ----------
@@ -2641,4 +2676,4 @@ async function init() {
 }
 
 if (typeof document !== 'undefined' && document.getElementById('view')) init();
-if (typeof module !== 'undefined') module.exports = { bpCategory, labFlag, unitOptions, amountLabel, recommendTargets, checkinSuggestion, medLevelSeries, doseMg, mapUSDA, niceName, trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
+if (typeof module !== 'undefined') module.exports = { matchScore, rankResults, bpCategory, labFlag, unitOptions, amountLabel, recommendTargets, checkinSuggestion, medLevelSeries, doseMg, mapUSDA, niceName, trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };

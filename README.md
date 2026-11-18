@@ -1,4 +1,4 @@
-# NutriTrack 6.0
+# NutriTrack 6.1
 
 A private nutrition tracker for iPhone, built as a Progressive Web App (PWA). It also opens in Edge or Chrome on Windows.
 
@@ -48,6 +48,8 @@ Total recurring cost: **$0**. You don't need an Apple Developer account, a paid 
 **Added in 5.1:** choose units when logging (servings, USDA portions like “1 large egg” or “1 cup”, oz, grams, and your own saved units); recommended targets from your stats (Mifflin–St Jeor and activity; protein about 1.5 g/kg of adjusted body weight; calorie floors of 1,500 for men and 1,200 for women); a weekly check-in that suggests calorie changes from your measured burn, at most 250 kcal at a time, keeping protein fixed. The injection-site map was removed.
 
 **Added in 6.0:** a health profile with conditions and a full medication list (statuses: taking, confirm, stopped); personalized guidance based on your medications, conditions, blood pressure and labs (for example: BP medicines and weight loss, avoiding potassium salt substitutes on losartan, hydration with a diuretic plus Wegovy, exercise effort on a beta-blocker, B12 with metformin); a blood pressure log with ACC/AHA categories, chart and safety prompts; lab results with common reference ranges and trends; targets that account for your conditions (sodium for high blood pressure, protein for kidney disease); health context added to recaps; meds, BP and labs added to the provider report.
+
+**Added in 6.1:** better food search. USDA brand-name foods are now included, and all sources are merged into one “Best matches” list ranked by how many of your words match the name and brand, with duplicates removed.
 
 **Planned (optional, later)**: automatic sync between iPhone and Windows through a private free-tier server; AI meal-photo recognition (paid, only with your approval).
 
