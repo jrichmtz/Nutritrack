@@ -4,7 +4,7 @@
   Local-first PWA: all personal data lives in this device's IndexedDB.
   Only barcode numbers / search words leave the device (sent to Open Food Facts).
 */
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '3.0.0';
 
 // ---------- Constants ----------
 const NUTS = [
@@ -46,9 +46,15 @@ const FEATURES = {
     'Nutrition-label photo with on-device text reading (OCR) and a review screen',
     'Recipes with per-serving nutrition',
     'Meal-photo workflow (photo + your foods or quick estimates)',
+    'Weight log with 7-day average, 30-day trend, total and percent lost, goal',
+    'Body measurements: waist, chest, neck, hips, thigh',
+    'Medication journal: doses, side effects, appetite',
+    'Apple Health import (steps, exercise, sleep, resting heart rate, weight)',
+    'Food vs activity vs weight comparison and a shareable progress report',
   ],
   planned: [
-    'Phase 3: Weight & measurements, medication journal, Apple Health import, reports',
+    'Optional later: automatic sync between iPhone and Windows (needs a private server)',
+    'Optional later: AI meal-photo recognition (paid, only with your approval)',
   ],
 };
 
@@ -203,7 +209,7 @@ const DB = (() => {
   function open() {
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open('nutritrack', 2);
+      const r = indexedDB.open('nutritrack', 3);
       r.onupgradeneeded = e => {
         const d = r.result;
         if (e.oldVersion < 1) {
@@ -214,6 +220,12 @@ const DB = (() => {
           d.createObjectStore('pending', { keyPath: 'barcode' });
         }
         if (e.oldVersion < 2) d.createObjectStore('photos', { keyPath: 'id' });
+        if (e.oldVersion < 3) {
+          d.createObjectStore('weights', { keyPath: 'id' });
+          d.createObjectStore('measurements', { keyPath: 'id' });
+          d.createObjectStore('meds', { keyPath: 'id' });
+          d.createObjectStore('health', { keyPath: 'date' });
+        }
       };
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
@@ -233,7 +245,7 @@ const DB = (() => {
     });
   }
   return {
-    STORES: ['foods', 'entries', 'days', 'kv', 'pending', 'photos'],
+    STORES: ['foods', 'entries', 'days', 'kv', 'pending', 'photos', 'weights', 'measurements', 'meds', 'health'],
     get: (s, k) => tx(s, 'readonly', st => st.get(k)),
     put: (s, v) => tx(s, 'readwrite', st => st.put(v)),
     del: (s, k) => tx(s, 'readwrite', st => st.delete(k)),
@@ -1221,42 +1233,535 @@ function openQuickEstimate(cb) {
   };
 }
 
-// ---------- Progress (real 7-day data) ----------
-async function renderProgress() {
-  const s = state.settings, today = dateStr();
-  const days = [];
-  for (let i = 6; i >= 0; i--) { const d = addDays(today, -i); const es = await entriesFor(d); days.push({ d, n: es.length, ...sumNuts(es).t }); }
-  const logged = days.filter(x => x.n);
-  const avg = k => logged.length ? logged.reduce((a, x) => a + x[k], 0) / logged.length : null;
-  const max = Math.max(s.kcal, ...days.map(x => x.kcal)) * 1.1 || 1;
-  view().innerHTML = `
-  <header class="topbar"><h1>Progress</h1></header>
-  <section class="card"><div class="spread"><h2 style="margin:0">Calories, last 7 days</h2><span class="pill">goal ${fmt(s.kcal)}</span></div>
-    <div class="week"><div class="goal-line" style="bottom:${(s.kcal / max * 100).toFixed(1)}%"></div>
-    ${days.map(x => `<div class="col"><div class="b ${x.n ? '' : 'empty'}" style="height:${x.n ? Math.max(2, x.kcal / max * 100) : 2}%"></div></div>`).join('')}</div>
-    <div class="week-labels">${days.map(x => `<div>${parseD(x.d).toLocaleDateString(undefined, { weekday: 'narrow' })}</div>`).join('')}</div></section>
-  <section class="card"><h2>Daily averages</h2>
-    <p class="small muted" style="margin-top:0">Based on ${logged.length} day${logged.length === 1 ? '' : 's'} with entries this week (days with nothing logged are left out).</p>
-    <div class="kv" style="border-top:0"><span>Calories</span><span>${fmt(avg('kcal'))}</span></div>
-    <div class="kv"><span>Protein</span><span>${fmt(avg('protein'))} g</span></div>
-    <div class="kv"><span>Carbohydrates</span><span>${fmt(avg('carbs'))} g</span></div>
-    <div class="kv"><span>Fat</span><span>${fmt(avg('fat'))} g</span></div>
-    <div class="kv"><span>Fiber</span><span>${fmt(avg('fiber'))} g</span></div></section>
-  <section class="card"><h2>Coming in Phase 3 <span class="pill">planned</span></h2>
-    <p class="small muted" style="margin:0">Weight log with 7-day average and 30-day trend, total and percent lost, body measurements (waist, chest, neck, hips, thigh), goals, and long-term graphs. Plateaus will only be flagged from the longer trend, not day-to-day swings.</p></section>`;
-  view().onclick = null;
+// ---------- Phase 3: weight, measurements ----------
+const MEASURES = [['waist', 'Waist (at navel)'], ['chest', 'Chest'], ['neck', 'Neck'], ['hips', 'Hips'], ['thigh', 'Thigh']];
+function lastPerDay(list, key) {
+  const m = {};
+  for (const r of list.slice().sort((a, b) => (a.date + (a.createdAt || 0)).localeCompare(b.date + (b.createdAt || 0)))) m[r.date] = r[key];
+  return Object.keys(m).sort().map(d => ({ date: d, v: m[d] }));
+}
+function avgWindow(days, endDate, n = 7) {
+  const start = addDays(endDate, -(n - 1));
+  const w = days.filter(x => x.date >= start && x.date <= endDate);
+  return w.length ? w.reduce((s, x) => s + x.v, 0) / w.length : null;
+}
+function daysBetween(a, b) { return Math.round((parseD(b) - parseD(a)) / 864e5); }
+// Trend is judged from 7-day averages over weeks, never from a single weigh-in.
+function weightStats(days, settings) {
+  if (!days.length) return null;
+  const first = days[0], last = days[days.length - 1];
+  const avg7 = avgWindow(days, last.date);
+  const start = num(settings.startWeight) ?? first.v;
+  const span = daysBetween(first.date, last.date);
+  const avg7ago30 = span >= 30 ? avgWindow(days, addDays(last.date, -30)) : null;
+  const avg7ago21 = span >= 28 ? avgWindow(days, addDays(last.date, -21)) : null;
+  let trend;
+  const recent = days.filter(d => d.date > addDays(last.date, -28)).length;
+  const ref = days.filter(d => d.date <= addDays(last.date, -56)).pop();
+  const Dl = d => parseD(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  if (recent < 8 && ref) {
+    // Weigh-ins are spaced out: compare actual weigh-ins at least 8 weeks apart instead of 7-day averages.
+    const wks = daysBetween(ref.date, last.date) / 7, ch = last.v - ref.v, rate = ch / wks;
+    trend = Math.abs(rate) < 0.25
+      ? { kind: 'steady', text: `${fmt(last.v, 1)} lb on ${Dl(last.date)} vs ${fmt(ref.v, 1)} lb on ${Dl(ref.date)}: under ¼ lb a week over ${fmt(wks, 0)} weeks, so weight has leveled off. Weigh-ins are spread out, so weighing a few times a week will make this more reliable.` }
+      : { kind: ch < 0 ? 'down' : 'up', text: `${fmt(last.v, 1)} lb on ${Dl(last.date)} vs ${fmt(ref.v, 1)} lb on ${Dl(ref.date)}: ${ch < 0 ? 'down' : 'up'} ${fmt(Math.abs(ch), 1)} lb over ${fmt(wks, 0)} weeks (about ${fmt(Math.abs(rate), 1)} lb/week). Weigh-ins are spread out, so weighing a few times a week will make this more reliable.` };
+  } else if (span < 14 || days.length < 5) trend = { kind: 'early', text: 'Keep logging — a reliable trend needs about 2 weeks of weigh-ins.' };
+  else if (avg7ago21 != null && avg7 != null) {
+    const ch = avg7 - avg7ago21, perWk = ch / 3;
+    if (Math.abs(ch) < 0.5) trend = { kind: 'steady', text: `Your 7-day average has changed less than 0.5 lb over the last 3 weeks. That’s a true leveling-off, not a day-to-day swing — worth mentioning to your provider if it continues.` };
+    else trend = { kind: ch < 0 ? 'down' : 'up', text: `7-day average is ${ch < 0 ? 'down' : 'up'} ${fmt(Math.abs(ch), 1)} lb over 3 weeks (about ${fmt(Math.abs(perWk), 1)} lb/week).` };
+  } else {
+    const a14 = avgWindow(days, addDays(last.date, -14));
+    trend = a14 != null && avg7 != null ? { kind: 'short', text: `7-day average ${avg7 <= a14 ? 'down' : 'up'} ${fmt(Math.abs(avg7 - a14), 1)} lb vs 2 weeks ago. A longer view needs 4+ weeks of data.` } : { kind: 'early', text: 'Keep logging to see a trend.' };
+  }
+  return {
+    first, last, avg7, start, lost: start - last.v, pctLost: start ? (start - last.v) / start * 100 : null,
+    change30: avg7ago30 != null && avg7 != null ? avg7 - avg7ago30 : null, trend,
+    toGoal: num(settings.goalWeight) != null ? last.v - num(settings.goalWeight) : null,
+  };
+}
+function movingAvg(days) { return days.map(d => ({ date: d.date, v: avgWindow(days, d.date) })); }
+function lineChart(series, opts = {}) {
+  const W = 340, H = opts.h || 170, L = 34, R = 8, T = 10, B = 22;
+  const pts = series.flatMap(s => s.pts);
+  if (pts.length < 1) return '<p class="small muted">No data yet.</p>';
+  const ts = pts.map(p => parseD(p.date).getTime());
+  let minT = Math.min(...ts), maxT = Math.max(...ts); if (minT === maxT) { minT -= 864e5; maxT += 864e5; }
+  const ys = pts.map(p => p.v).concat(opts.goal != null ? [opts.goal] : []);
+  let minY = Math.min(...ys), maxY = Math.max(...ys); const pad = Math.max(1, (maxY - minY) * 0.12); minY -= pad; maxY += pad;
+  const X = d => L + (parseD(d).getTime() - minT) / (maxT - minT) * (W - L - R);
+  const Y = v => T + (maxY - v) / (maxY - minY) * (H - T - B);
+  const ticks = [maxY - pad, (minY + maxY) / 2, minY + pad];
+  const lab = d => parseD(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const sorted = pts.slice().sort((a, b) => a.date.localeCompare(b.date));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(opts.label || 'chart')}" style="display:block">`;
+  for (const t of ticks) svg += `<line x1="${L}" x2="${W - R}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" stroke="#8884" stroke-width=".5"/><text x="${L - 4}" y="${(Y(t) + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="#888">${fmt(t, 0)}</text>`;
+  if (opts.goal != null) svg += `<line x1="${L}" x2="${W - R}" y1="${Y(opts.goal).toFixed(1)}" y2="${Y(opts.goal).toFixed(1)}" stroke="#ff9f0a" stroke-dasharray="4 3" stroke-width="1.2"/><text x="${W - R}" y="${(Y(opts.goal) - 3).toFixed(1)}" font-size="9" text-anchor="end" fill="#ff9f0a">goal</text>`;
+  for (const s of series) {
+    const p = s.pts.filter(x => x.v != null).sort((a, b) => a.date.localeCompare(b.date));
+    if (s.type === 'line' && p.length > 1) svg += `<polyline fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linejoin="round" points="${p.map(x => X(x.date).toFixed(1) + ',' + Y(x.v).toFixed(1)).join(' ')}"/>`;
+    if (s.type === 'dots') svg += p.map(x => `<circle cx="${X(x.date).toFixed(1)}" cy="${Y(x.v).toFixed(1)}" r="2.6" fill="${s.color}" opacity=".55"/>`).join('');
+  }
+  svg += `<text x="${L}" y="${H - 6}" font-size="9" fill="#888">${lab(sorted[0].date)}</text><text x="${W - R}" y="${H - 6}" font-size="9" text-anchor="end" fill="#888">${lab(sorted[sorted.length - 1].date)}</text></svg>`;
+  return svg;
+}
+function openWeightSheet() {
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Log weight</div><span style="width:50px"></span></div>
+    <label class="f">Weight (lb)</label><input class="in" id="wt-v" type="number" inputmode="decimal" step="any" style="font-size:24px; text-align:center">
+    <label class="f">Date</label><input class="in" id="wt-d" type="date" value="${dateStr()}">
+    <label class="f">Note</label><input class="in" id="wt-n" placeholder="optional">
+    <p class="tiny muted">Tip: weigh at the same time each day, like first thing in the morning. The app watches the 7-day average, so daily ups and downs won’t mislead you.</p>
+    <div class="stack"><button class="btn primary big" data-act="ok">Save</button></div>
+    <h3>Recent</h3><div class="card"><ul class="list" id="wt-list"></ul></div>`);
+  const drawList = async () => {
+    const list = (await DB.all('weights')).sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 30);
+    $('#wt-list', el).innerHTML = list.length ? list.map(w => `<li class="spread"><div class="item" style="flex:1"><div class="grow"><div class="t">${fmt(w.lb, 1)} lb</div>
+      <div class="s">${esc(niceDate(w.date))}${w.source ? ' · ' + esc(w.source) : ''}${w.note ? ' · ' + esc(w.note) : ''}</div></div></div><button class="link" style="color:var(--red)" data-del="${w.id}">Delete</button></li>`).join('')
+      : '<li class="small muted" style="padding:8px 0">No weigh-ins yet.</li>';
+  };
+  drawList();
+  setTimeout(() => $('#wt-v', el).focus(), 300);
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.del) { if (confirm('Delete this weigh-in?')) { await DB.del('weights', b.dataset.del); drawList(); render(); } return; }
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'ok') {
+      const v = num($('#wt-v', el).value);
+      if (!(v > 40 && v < 1000)) { toast('Enter your weight in pounds'); return; }
+      await DB.put('weights', { id: uid(), date: $('#wt-d', el).value || dateStr(), lb: v, note: $('#wt-n', el).value.trim(), createdAt: Date.now() });
+      closeSheet(); toast('Weight saved'); render();
+    }
+  };
+}
+function openMeasureSheet() {
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Measurements</div><span style="width:50px"></span></div>
+    <p class="small muted">Inches. Fill in only what you measured today.</p>
+    <label class="f">Date</label><input class="in" id="ms-d" type="date" value="${dateStr()}">
+    <div class="grid2">${MEASURES.map(([k, l]) => `<div><label class="f">${l}</label><input class="in" data-m="${k}" type="number" inputmode="decimal" step="any"></div>`).join('')}</div>
+    <div class="stack"><button class="btn primary big" data-act="ok">Save</button></div>`);
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'ok') {
+      const rec = { id: uid(), date: $('#ms-d', el).value || dateStr(), createdAt: Date.now() };
+      let any = false; $$('[data-m]', el).forEach(i => { const v = num(i.value); rec[i.dataset.m] = v; if (v != null) any = true; });
+      if (!any) { toast('Enter at least one measurement'); return; }
+      await DB.put('measurements', rec); closeSheet(); toast('Measurements saved'); render();
+    }
+  };
+}
+function measureSummary(list) {
+  return MEASURES.map(([k, l]) => {
+    const d = lastPerDay(list.filter(r => r[k] != null), k);
+    if (!d.length) return null;
+    return { k, l, first: d[0], last: d[d.length - 1], change: d[d.length - 1].v - d[0].v };
+  }).filter(Boolean);
 }
 
-// ---------- Health (planned) ----------
+// ---------- Progress tab ----------
+async function renderProgress() {
+  const s = state.settings, today = dateStr();
+  const range = state.wRange || 90;
+  const weights = await DB.all('weights');
+  const days = lastPerDay(weights, 'lb');
+  const ws = weightStats(days, s);
+  const shown = range === 'all' ? days : days.filter(d => d.date >= addDays(today, -range));
+  const meas = measureSummary(await DB.all('measurements'));
+  const health = Object.fromEntries((await DB.all('health')).map(h => [h.date, h]));
+  const cal = [];
+  for (let i = 13; i >= 0; i--) { const d = addDays(today, -i); const es = await entriesFor(d); cal.push({ d, n: es.length, ...sumNuts(es).t }); }
+  const last7 = cal.slice(-7), logged = last7.filter(x => x.n);
+  const avg = k => logged.length ? logged.reduce((a, x) => a + x[k], 0) / logged.length : null;
+  const max = Math.max(s.kcal, ...last7.map(x => x.kcal)) * 1.1 || 1;
+  const wDay = Object.fromEntries(days.map(d => [d.date, d.v]));
+  const hasHealth = cal.some(x => health[x.d]);
+  view().innerHTML = `
+  <header class="topbar"><h1>Progress</h1><button class="icon-btn" data-act="report" aria-label="Report">${ICON.label}</button></header>
+  <section class="card"><div class="spread"><h2 style="margin:0">Weight</h2><button class="btn secondary" data-act="weight">+ Log weight</button></div>
+    ${ws ? `<div class="totals" style="grid-template-columns:repeat(3,1fr); margin-top:12px">
+      <div><div class="big">${fmt(ws.last.v, 1)}</div><div class="lbl">latest (lb)</div></div>
+      <div><div class="big">${fmt(ws.avg7, 1)}</div><div class="lbl">7-day avg</div></div>
+      <div><div class="big">${ws.lost >= 0 ? '−' : '+'}${fmt(Math.abs(ws.lost), 1)}</div><div class="lbl">${fmt(Math.abs(ws.pctLost), 1)}% ${ws.lost >= 0 ? 'lost' : 'gained'}</div></div></div>
+      <div class="seg" style="margin:14px 0 6px">${[[30, '30 days'], [90, '90 days'], ['all', 'All']].map(([v, l]) => `<button data-range="${v}" class="${String(range) === String(v) ? 'on' : ''}">${l}</button>`).join('')}</div>
+      ${lineChart([{ pts: shown.map(d => ({ date: d.date, v: d.v })), type: 'dots', color: '#1f9d55' }, { pts: movingAvg(days).filter(d => shown.some(x => x.date === d.date)), type: 'line', color: '#0a84ff' }], { goal: num(s.goalWeight), label: 'Weight chart' })}
+      <p class="tiny muted" style="margin:4px 0 10px">Dots: weigh-ins · Blue line: 7-day average${num(s.goalWeight) != null ? ' · Dashed: goal' : ''}</p>
+      <div class="kv" style="border-top:0"><span class="muted">Starting weight</span><span>${fmt(ws.start, 1)} lb${num(s.startWeight) == null ? ' (first weigh-in, ' + esc(niceDate(ws.first.date)) + ')' : ''}</span></div>
+      <div class="kv"><span class="muted">30-day change (7-day avg)</span><span>${ws.change30 == null ? 'needs 30 days' : (ws.change30 <= 0 ? '−' : '+') + fmt(Math.abs(ws.change30), 1) + ' lb'}</span></div>
+      ${num(s.heightIn) ? `<div class="kv"><span class="muted">BMI (latest · at start)</span><span>${fmt(703 * ws.last.v / num(s.heightIn) ** 2, 1)} · ${fmt(703 * ws.start / num(s.heightIn) ** 2, 1)}</span></div>` : ''}
+      ${ws.toGoal != null ? `<div class="kv"><span class="muted">To goal (${fmt(num(s.goalWeight), 1)} lb)</span><span>${ws.toGoal > 0 ? fmt(ws.toGoal, 1) + ' lb to go' : 'Goal reached'}</span></div>` : ''}
+      <div class="warnbox" style="margin:12px 0 0">${esc(ws.trend.text)}</div>`
+      : `<p class="small muted">Log your first weigh-in to start tracking. Set a goal and starting weight in Settings (gear on Home).</p>`}
+  </section>
+  <section class="card"><div class="spread"><h2 style="margin:0">Measurements</h2><button class="btn secondary" data-act="measure">+ Log</button></div>
+    ${meas.length ? meas.map(m => { const fd = esc(parseD(m.first.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }));
+      return `<div class="kv"><span>${m.l}</span><span>${fmt(m.last.v, 2)} in <span class="muted small">(${m.first.date === m.last.date ? 'measured ' + fd : (m.change <= 0 ? '−' : '+') + fmt(Math.abs(m.change), 2) + ' since ' + fd})</span></span></div>`; }).join('')
+      : '<p class="small muted">Waist, chest, neck, hips and thigh, in inches.</p>'}
+  </section>
+  <section class="card"><div class="spread"><h2 style="margin:0">Calories, last 7 days</h2><span class="pill">goal ${fmt(s.kcal)}</span></div>
+    <div class="week"><div class="goal-line" style="bottom:${(s.kcal / max * 100).toFixed(1)}%"></div>
+    ${last7.map(x => `<div class="col"><div class="b ${x.n ? '' : 'empty'}" style="height:${x.n ? Math.max(2, x.kcal / max * 100) : 2}%"></div></div>`).join('')}</div>
+    <div class="week-labels">${last7.map(x => `<div>${parseD(x.d).toLocaleDateString(undefined, { weekday: 'narrow' })}</div>`).join('')}</div>
+    <p class="small muted">7-day averages (${logged.length} logged day${logged.length === 1 ? '' : 's'}): ${fmt(avg('kcal'))} kcal · ${fmt(avg('protein'))} g protein · ${fmt(avg('fiber'))} g fiber</p></section>
+  <section class="card"><h2>Food, activity &amp; weight — 14 days</h2>
+    ${hasHealth ? '' : '<p class="small muted" style="margin-top:0">Steps and sleep appear after you import Apple Health data (Health tab).</p>'}
+    <div style="overflow-x:auto"><table class="nut" style="font-size:14px; min-width:420px"><tr class="muted"><td>Day</td><td style="text-align:right">kcal</td><td style="text-align:right">Protein</td><td style="text-align:right">Steps</td><td style="text-align:right">Sleep</td><td style="text-align:right">Weight</td></tr>
+    ${cal.slice().reverse().map(x => { const h = health[x.d] || {}; return `<tr><td>${esc(parseD(x.d).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric', weekday: 'short' }))}</td>
+      <td style="text-align:right">${x.n ? fmt(x.kcal) : '—'}</td><td style="text-align:right">${x.n ? fmt(x.protein) + 'g' : '—'}</td>
+      <td style="text-align:right">${fmt(h.steps)}</td><td style="text-align:right">${h.sleepHrs != null ? fmt(h.sleepHrs, 1) + 'h' : '—'}</td><td style="text-align:right">${wDay[x.d] != null ? fmt(wDay[x.d], 1) : '—'}</td></tr>`; }).join('')}
+    </table></div></section>
+  <div class="stack"><button class="btn primary big" data-act="report">Create progress report</button></div>`;
+  view().onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.range) { state.wRange = b.dataset.range === 'all' ? 'all' : Number(b.dataset.range); render(); return; }
+    const a = b.dataset.act;
+    if (a === 'weight') openWeightSheet();
+    else if (a === 'measure') openMeasureSheet();
+    else if (a === 'report') openReportSheet();
+  };
+}
+
+// ---------- Medication journal ----------
+const APPETITE = ['Much less', 'Less', 'Normal', 'More'];
+const SEVERITY = ['None', 'Mild', 'Moderate', 'Severe'];
+function openMedProfile() {
+  const s = state.settings;
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">My medication</div><button class="link" data-act="ok">Save</button></div>
+    <p class="small muted">Enter what your prescription says. This journal records; it never suggests dose changes.</p>
+    <label class="f">Medication</label><input class="in" id="mp-n" value="${esc(s.medName || '')}" placeholder="e.g. Wegovy">
+    <label class="f">Current prescribed dose</label><input class="in" id="mp-d" value="${esc(s.medDose || '')}" placeholder="e.g. 0.5 mg">
+    <label class="f">Schedule</label><select class="in" id="mp-s">${[['weekly', 'Once a week'], ['daily', 'Daily'], ['other', 'Other / as prescribed']].map(([v, l]) => `<option value="${v}"${(s.medSchedule || 'weekly') === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+    <div class="stack"><button class="btn primary big" data-act="ok">Save</button></div>`);
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'ok') {
+      Object.assign(state.settings, { medName: $('#mp-n', el).value.trim(), medDose: $('#mp-d', el).value.trim(), medSchedule: $('#mp-s', el).value });
+      await DB.put('kv', state.settings); closeSheet(); toast('Saved'); render();
+    }
+  };
+}
+function openDoseSheet(rec) {
+  const s = state.settings, r = rec || { id: uid(), type: 'dose', date: dateStr(), med: s.medName || '', dose: s.medDose || '', site: '', notes: '', createdAt: Date.now() };
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">${rec ? 'Edit dose' : 'Log dose'}</div><span style="width:50px"></span></div>
+    <label class="f">Medication</label><input class="in" id="ds-m" value="${esc(r.med)}">
+    <label class="f">Dose taken</label><input class="in" id="ds-d" value="${esc(r.dose)}" placeholder="e.g. 0.5 mg">
+    <label class="f">Date</label><input class="in" id="ds-dt" type="date" value="${r.date}">
+    <label class="f">Injection site</label><select class="in" id="ds-s">${['', 'Abdomen', 'Thigh', 'Upper arm', 'Other'].map(v => `<option${r.site === v ? ' selected' : ''}>${v}</option>`).join('')}</select>
+    <label class="f">Notes</label><input class="in" id="ds-n" value="${esc(r.notes)}">
+    <div class="stack"><button class="btn primary big" data-act="ok">Save</button>${rec ? '<button class="btn danger" data-act="del">Delete</button>' : ''}</div>`);
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'del') { if (confirm('Delete this dose record?')) { await DB.del('meds', r.id); closeSheet(); render(); } }
+    if (b.dataset.act === 'ok') {
+      Object.assign(r, { med: $('#ds-m', el).value.trim(), dose: $('#ds-d', el).value.trim(), date: $('#ds-dt', el).value || dateStr(), site: $('#ds-s', el).value, notes: $('#ds-n', el).value.trim() });
+      if (!r.med) { toast('Enter the medication name'); return; }
+      await DB.put('meds', r); closeSheet(); toast('Dose logged'); render();
+    }
+  };
+}
+function openSymptomSheet(rec) {
+  const r = rec || { id: uid(), type: 'symptom', date: dateStr(), nausea: 0, constipation: 0, appetite: 2, other: '', notes: '', createdAt: Date.now() };
+  const seg = (k, opts) => `<div class="seg" data-seg="${k}">${opts.map((l, i) => `<button data-v="${i}" class="${r[k] === i ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">How I feel</div><span style="width:50px"></span></div>
+    <label class="f">Date</label><input class="in" id="sy-dt" type="date" value="${r.date}">
+    <label class="f">Appetite</label>${seg('appetite', APPETITE)}
+    <label class="f">Nausea</label>${seg('nausea', SEVERITY)}
+    <label class="f">Constipation</label>${seg('constipation', SEVERITY)}
+    <label class="f">Other side effects</label><input class="in" id="sy-o" value="${esc(r.other)}" placeholder="e.g. heartburn, fatigue, headache">
+    <label class="f">Notes</label><input class="in" id="sy-n" value="${esc(r.notes)}">
+    <p class="tiny muted">For severe or worrying symptoms, contact your healthcare provider — don’t wait for a report.</p>
+    <div class="stack"><button class="btn primary big" data-act="ok">Save</button>${rec ? '<button class="btn danger" data-act="del">Delete</button>' : ''}</div>`);
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const sg = b.closest('[data-seg]');
+    if (sg) { r[sg.dataset.seg] = Number(b.dataset.v); $$('button', sg).forEach(x => x.classList.toggle('on', x === b)); return; }
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'del') { if (confirm('Delete this entry?')) { await DB.del('meds', r.id); closeSheet(); render(); } }
+    if (b.dataset.act === 'ok') {
+      Object.assign(r, { date: $('#sy-dt', el).value || dateStr(), other: $('#sy-o', el).value.trim(), notes: $('#sy-n', el).value.trim() });
+      await DB.put('meds', r); closeSheet(); toast('Saved'); render();
+    }
+  };
+}
+
+// ---------- Apple Health import (export.zip or export.xml, read on the phone) ----------
+async function zipEntryStream(file, match) {
+  const tailLen = Math.min(file.size, 65557);
+  const tail = new DataView(await file.slice(file.size - tailLen).arrayBuffer());
+  let eocd = -1;
+  for (let i = tail.byteLength - 22; i >= 0; i--) if (tail.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('That file isn’t a zip. Choose export.zip from the Health app.');
+  let count = tail.getUint16(eocd + 10, true), cdSize = tail.getUint32(eocd + 12, true), cdOff = tail.getUint32(eocd + 16, true);
+  if (cdOff === 0xFFFFFFFF || count === 0xFFFF || cdSize === 0xFFFFFFFF) {
+    const loc = eocd - 20;
+    if (loc >= 0 && tail.getUint32(loc, true) === 0x07064b50) {
+      const e64 = Number(tail.getBigUint64(loc + 8, true));
+      const e = new DataView(await file.slice(e64, e64 + 56).arrayBuffer());
+      count = Number(e.getBigUint64(32, true)); cdSize = Number(e.getBigUint64(40, true)); cdOff = Number(e.getBigUint64(48, true));
+    }
+  }
+  const cd = new DataView(await file.slice(cdOff, cdOff + cdSize).arrayBuffer());
+  const td = new TextDecoder();
+  let p = 0;
+  for (let n = 0; n < count && p + 46 <= cd.byteLength; n++) {
+    if (cd.getUint32(p, true) !== 0x02014b50) break;
+    const method = cd.getUint16(p + 10, true);
+    let csize = cd.getUint32(p + 20, true), usize = cd.getUint32(p + 24, true), lho = cd.getUint32(p + 42, true);
+    const nl = cd.getUint16(p + 28, true), xl = cd.getUint16(p + 30, true), cl = cd.getUint16(p + 32, true);
+    const name = td.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nl));
+    let q = p + 46 + nl; const xe = q + xl;
+    while (q + 4 <= xe) {
+      const id = cd.getUint16(q, true), sz = cd.getUint16(q + 2, true);
+      if (id === 1) { let r = q + 4; if (usize === 0xFFFFFFFF) { usize = Number(cd.getBigUint64(r, true)); r += 8; } if (csize === 0xFFFFFFFF) { csize = Number(cd.getBigUint64(r, true)); r += 8; } if (lho === 0xFFFFFFFF) { lho = Number(cd.getBigUint64(r, true)); } }
+      q += 4 + sz;
+    }
+    if (match(name)) {
+      const lh = new DataView(await file.slice(lho, lho + 30).arrayBuffer());
+      const start = lho + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+      const blob = file.slice(start, start + csize);
+      if (method === 0) return { stream: blob.stream(), size: usize };
+      if (method === 8) {
+        if (typeof DecompressionStream === 'undefined') throw new Error('This iPhone’s software is too old to open the zip. Update iOS, or unzip it in Files and choose export.xml.');
+        return { stream: blob.stream().pipeThrough(new DecompressionStream('deflate-raw')), size: usize };
+      }
+      throw new Error('Unsupported zip compression.');
+    }
+    p += 46 + nl + xl + cl;
+  }
+  return null;
+}
+function hkTime(s) { const m = String(s).match(/^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) ([+-]\d\d)(\d\d)$/); return m ? Date.parse(`${m[1]}T${m[2]}${m[3]}:${m[4]}`) : Date.parse(s); }
+function makeHealthParser(since) {
+  const agg = {};
+  const day = d => (agg[d] = agg[d] || { steps: {}, active: {}, exercise: {}, sleep: {}, rhr: [0, 0], weight: null });
+  const attr = (tag, n) => { const i = tag.indexOf(' ' + n + '="'); if (i < 0) return null; const s = i + n.length + 3; return tag.slice(s, tag.indexOf('"', s)); };
+  const WANT = /HK(?:Quantity|Category)TypeIdentifier(StepCount|ActiveEnergyBurned|AppleExerciseTime|RestingHeartRate|BodyMass|SleepAnalysis)"/;
+  let carry = '', records = 0;
+  function handle(tag) {
+    const m = tag.match(WANT); if (!m) return;
+    const T = m[1], startS = attr(tag, 'startDate'); if (!startS) return;
+    const endS = attr(tag, 'endDate') || startS, src = attr(tag, 'sourceName') || '?';
+    if (T === 'SleepAnalysis') {
+      const v = attr(tag, 'value') || ''; if (!/Asleep/.test(v)) return;
+      const d = endS.slice(0, 10); if (d < since) return;
+      const hrs = (hkTime(endS) - hkTime(startS)) / 36e5; if (!(hrs > 0 && hrs < 24)) return;
+      const o = day(d).sleep; o[src] = (o[src] || 0) + hrs; records++; return;
+    }
+    const d = startS.slice(0, 10); if (d < since) return;
+    const v = parseFloat(attr(tag, 'value')); if (!isFinite(v)) return;
+    const unit = attr(tag, 'unit'), o = day(d); records++;
+    if (T === 'StepCount') o.steps[src] = (o.steps[src] || 0) + v;
+    else if (T === 'ActiveEnergyBurned') o.active[src] = (o.active[src] || 0) + (unit === 'kJ' ? v / 4.184 : v);
+    else if (T === 'AppleExerciseTime') o.exercise[src] = (o.exercise[src] || 0) + v;
+    else if (T === 'RestingHeartRate') { o.rhr[0] += v; o.rhr[1]++; }
+    else if (T === 'BodyMass') { const lb = unit === 'kg' ? v * 2.20462 : unit === 'lb' ? v : null; if (lb == null) return; const t = hkTime(startS); if (!o.weight || t >= o.weight.t) o.weight = { v: lb, t }; }
+  }
+  return {
+    feed(text, final) {
+      carry += text;
+      const cut = final ? carry.length : carry.lastIndexOf('\n');
+      if (cut < 0) return;
+      const part = carry.slice(0, cut); carry = carry.slice(cut);
+      const re = /<Record\s[^>]*>/g; let mm;
+      while ((mm = re.exec(part))) handle(mm[0]);
+    },
+    // Several devices (iPhone + Watch) can record the same steps; using the largest single source avoids double counting.
+    result() {
+      const mx = o => { const v = Object.values(o); return v.length ? Math.max(...v) : null; };
+      return Object.keys(agg).sort().map(d => { const a = agg[d]; return {
+        date: d, steps: mx(a.steps) != null ? Math.round(mx(a.steps)) : null, activeKcal: mx(a.active) != null ? Math.round(mx(a.active)) : null,
+        exerciseMin: mx(a.exercise) != null ? Math.round(mx(a.exercise)) : null, sleepHrs: mx(a.sleep) != null ? Math.round(mx(a.sleep) * 10) / 10 : null,
+        restingHR: a.rhr[1] ? Math.round(a.rhr[0] / a.rhr[1]) : null, weightLb: a.weight ? Math.round(a.weight.v * 10) / 10 : null };
+      }).filter(r => r.steps != null || r.activeKcal != null || r.exerciseMin != null || r.sleepHrs != null || r.restingHR != null || r.weightLb != null);
+    },
+    get records() { return records; },
+  };
+}
+async function importAppleHealth(file, sinceDays, onProgress) {
+  const since = sinceDays ? addDays(dateStr(), -sinceDays) : '0000-00-00';
+  let src;
+  if (/\.xml$/i.test(file.name)) src = { stream: file.stream(), size: file.size };
+  else src = await zipEntryStream(file, n => /(^|\/)export\.xml$/.test(n));
+  if (!src) throw new Error('No export.xml inside that zip. Choose the export.zip made by the Health app.');
+  const parser = makeHealthParser(since), dec = new TextDecoder(), reader = src.stream.getReader();
+  let read = 0, lastTick = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    read += value.length;
+    parser.feed(dec.decode(value, { stream: true }), false);
+    if (Date.now() - lastTick > 250) { lastTick = Date.now(); onProgress(src.size ? Math.min(0.99, read / src.size) : null); await new Promise(r => setTimeout(r, 0)); }
+  }
+  parser.feed(dec.decode(), true);
+  return { days: parser.result(), records: parser.records };
+}
+function openHealthImport() {
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Import Apple Health</div><span style="width:50px"></span></div>
+    <div class="card"><b>First, export from the Health app</b>
+      <ol class="small" style="padding-left:20px; margin:8px 0 0"><li>Open <b>Health</b> → tap your picture (top right).</li><li>Tap <b>Export All Health Data</b> → <b>Export</b>. It can take a few minutes.</li><li>Choose <b>Save to Files</b>.</li></ol></div>
+    <label class="f">How far back</label><select class="in" id="hi-r"><option value="90">Last 90 days</option><option value="365" selected>Last year</option><option value="0">Everything</option></select>
+    <label class="row small" style="gap:10px; margin-top:14px"><input type="checkbox" id="hi-w" checked style="width:22px;height:22px"> Add Apple Health weights to my weight log (days I didn’t log one)</label>
+    <p class="tiny muted">Imported: steps, active calories, exercise minutes, sleep, resting heart rate and weight. The file is read on this phone and never uploaded. Large exports can take a minute or two.</p>
+    <div class="stack"><button class="btn primary big" data-act="pick">Choose export file</button></div>`);
+  el.onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act !== 'pick') return;
+    const sinceDays = Number($('#hi-r', el).value), addW = $('#hi-w', el).checked;
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.zip,.xml,application/zip,text/xml,application/xml';
+    inp.onchange = async () => {
+      const file = inp.files && inp.files[0]; if (!file) return;
+      closeSheet();
+      const pg = openSheet(`<div class="sheet-head"><span></span><div class="sheet-title">Importing</div><span></span></div>
+        <div class="card" style="text-align:center"><div class="big" id="hi-p">0%</div><p class="small muted">Reading your Health export on this phone…</p><div class="bar"><i id="hi-b" style="width:0%"></i></div></div>`);
+      try {
+        const res = await importAppleHealth(file, sinceDays, p => { if (p != null) { $('#hi-p', pg).textContent = Math.round(p * 100) + '%'; $('#hi-b', pg).style.width = (p * 100) + '%'; } });
+        for (const d of res.days) await DB.put('health', d);
+        let added = 0;
+        if (addW) {
+          const have = new Set((await DB.all('weights')).map(w => w.date));
+          for (const d of res.days) if (d.weightLb != null && !have.has(d.date)) { await DB.put('weights', { id: uid(), date: d.date, lb: d.weightLb, source: 'Apple Health', createdAt: Date.now() }); added++; }
+        }
+        await DB.put('kv', { key: 'lastHealthImport', at: Date.now(), days: res.days.length });
+        closeSheet();
+        toast(res.days.length ? `Imported ${res.days.length} days${added ? `, ${added} weigh-ins` : ''}` : 'No matching data found for that period', 4000);
+        render();
+      } catch (err) { closeSheet(); toast('Import failed: ' + err.message, 5000); }
+    };
+    inp.click();
+  };
+}
+
+// ---------- Health tab ----------
 async function renderHealth() {
+  const s = state.settings, today = dateStr();
+  const meds = (await DB.all('meds')).sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0));
+  const doses = meds.filter(m => m.type === 'dose'), symptoms = meds.filter(m => m.type === 'symptom');
+  const lastDose = doses[0];
+  const since = lastDose ? daysBetween(lastDose.date, today) : null;
+  const next = lastDose && (s.medSchedule || 'weekly') === 'weekly' ? addDays(lastDose.date, 7) : null;
+  const days = lastPerDay(await DB.all('weights'), 'lb');
+  const firstDose = doses[doses.length - 1];
+  let wSinceMed = null;
+  if (firstDose && days.length) {
+    // Use the weigh-in closest to the first dose, and only if it is within 2 weeks of it.
+    const near = days.slice().sort((a, b) => Math.abs(daysBetween(a.date, firstDose.date)) - Math.abs(daysBetween(b.date, firstDose.date)))[0];
+    const last = days[days.length - 1];
+    if (near && Math.abs(daysBetween(near.date, firstDose.date)) <= 14 && last.date > near.date) wSinceMed = { from: near, to: last, ch: last.v - near.v };
+  }
+  const health = (await DB.all('health')).sort((a, b) => a.date.localeCompare(b.date));
+  const recentH = health.filter(h => h.date > addDays(today, -7));
+  const havg = k => { const v = recentH.map(h => h[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  const lastImp = await DB.get('kv', 'lastHealthImport');
+  const hist = meds.slice(0, 12);
   view().innerHTML = `
   <header class="topbar"><h1>Health</h1></header>
-  <section class="card"><h2>Medication journal <span class="pill">planned · Phase 3</span></h2>
-    <p class="small muted" style="margin:0">Medication name, prescribed dose, administration dates, side effects, appetite changes, nausea or constipation, and weight over time — organized as a report to share with your healthcare provider. It will record, not recommend, doses.</p></section>
-  <section class="card"><h2>Apple Health <span class="pill">planned · Phase 3</span></h2>
-    <p class="small muted" style="margin:0">Web apps can’t read Apple Health directly — Apple only allows that for native apps. Phase 3 will import the export file from the Health app (steps, weight, resting heart rate, exercise, sleep), and can use an iPhone Shortcut to send daily numbers here without a native app.</p></section>
-  <section class="card"><h2>What works today</h2><ul class="status-list small">${FEATURES.done.map(x => `<li>${esc(x)}</li>`).join('')}</ul></section>`;
-  view().onclick = null;
+  <section class="card"><div class="spread"><h2 style="margin:0">${esc(s.medName || 'Medication journal')}</h2><button class="link" data-act="profile">${s.medName ? 'Edit' : 'Set up'}</button></div>
+    ${s.medName ? `<p class="small muted" style="margin:4px 0 8px">Prescribed: ${esc(s.medDose || '—')} · ${esc({ weekly: 'once a week', daily: 'daily', other: 'as prescribed' }[s.medSchedule || 'weekly'])}</p>` : '<p class="small muted">Add your medication and prescribed dose to start the journal.</p>'}
+    ${lastDose ? `<div class="kv" style="border-top:0"><span class="muted">Last dose</span><span>${esc(lastDose.dose || '')} · ${esc(niceDate(lastDose.date))} (${since === 0 ? 'today' : since + ' day' + (since === 1 ? '' : 's') + ' ago'})</span></div>
+      ${next && next >= today ? `<div class="kv"><span class="muted">Next on weekly schedule</span><span>${esc(longDate(next))}</span></div>` : ''}
+      ${next && next < today ? `<p class="small muted" style="margin:6px 0 0">No dose logged since ${esc(niceDate(lastDose.date))}. Log any recent doses to keep the journal current.</p>` : ''}` : ''}
+    ${wSinceMed ? `<div class="kv"><span class="muted">Weight since starting (${esc(parseD(wSinceMed.from.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))} weigh-in)</span><span>${wSinceMed.ch <= 0 ? '−' : '+'}${fmt(Math.abs(wSinceMed.ch), 1)} lb</span></div>` : ''}
+    <div class="row" style="margin-top:12px"><button class="btn primary" style="flex:1" data-act="dose">Log dose</button><button class="btn secondary" style="flex:1" data-act="symptom">How I feel</button></div>
+    <p class="tiny muted" style="margin-bottom:0">For tracking and sharing with your provider. It never changes or recommends doses.</p></section>
+  ${hist.length ? `<section class="card"><h2>Journal</h2><ul class="list">${hist.map(m => `<li><button class="item" data-med="${m.id}"><div class="grow">
+    <div class="t">${m.type === 'dose' ? '💉 ' + esc([m.med, m.dose].filter(Boolean).join(' ')) : '📝 Appetite: ' + APPETITE[m.appetite] + (m.nausea ? ' · Nausea: ' + SEVERITY[m.nausea] : '') + (m.constipation ? ' · Constipation: ' + SEVERITY[m.constipation] : '')}</div>
+    <div class="s">${esc(niceDate(m.date))}${m.site ? ' · ' + esc(m.site) : ''}${m.other ? ' · ' + esc(m.other) : ''}${m.notes ? ' · ' + esc(m.notes) : ''}</div></div></button></li>`).join('')}</ul></section>` : ''}
+  <section class="card"><div class="spread"><h2 style="margin:0">Apple Health</h2><button class="btn secondary" data-act="import">Import</button></div>
+    ${recentH.length ? `<p class="small muted" style="margin:6px 0">Last 7 days of imported data (daily average):</p>
+      <div class="kv" style="border-top:0"><span>Steps</span><span>${fmt(havg('steps'))}</span></div>
+      <div class="kv"><span>Exercise</span><span>${havg('exerciseMin') != null ? fmt(havg('exerciseMin')) + ' min' : '—'}</span></div>
+      <div class="kv"><span>Sleep</span><span>${havg('sleepHrs') != null ? fmt(havg('sleepHrs'), 1) + ' h' : '—'}</span></div>
+      <div class="kv"><span>Resting heart rate</span><span>${havg('restingHR') != null ? fmt(havg('restingHR')) + ' bpm' : '—'}</span></div>
+      <div class="kv"><span>Active calories</span><span>${fmt(havg('activeKcal'))}</span></div>`
+      : `<p class="small muted">${health.length ? 'No imported data from the last 7 days — import a fresh export to update.' : 'Import your Health app export to see steps, exercise, sleep, resting heart rate and weight next to your food log.'}</p>`}
+    <p class="tiny muted" style="margin-bottom:0">${lastImp ? 'Last import: ' + esc(new Date(lastImp.at).toLocaleDateString()) + '. ' : ''}Web apps can’t read Apple Health directly (Apple allows that only for App Store apps), so re-import an export whenever you want fresher numbers.</p></section>`;
+  view().onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.med) { const m = meds.find(x => x.id === b.dataset.med); if (m) (m.type === 'dose' ? openDoseSheet : openSymptomSheet)(m); return; }
+    const a = b.dataset.act;
+    if (a === 'profile') openMedProfile();
+    else if (a === 'dose') openDoseSheet();
+    else if (a === 'symptom') openSymptomSheet();
+    else if (a === 'import') openHealthImport();
+  };
+}
+
+// ---------- Progress report (for you or your provider) ----------
+async function buildReport(rangeDays) {
+  const s = state.settings, today = dateStr();
+  const from = rangeDays ? addDays(today, -(rangeDays - 1)) : '0000-00-00';
+  const inR = d => d >= from && d <= today;
+  const allDays = lastPerDay(await DB.all('weights'), 'lb');
+  const wDays = allDays.filter(d => inR(d.date));
+  const ws = weightStats(allDays, s);
+  const meds = (await DB.all('meds')).filter(m => inR(m.date)).sort((a, b) => a.date.localeCompare(b.date));
+  const doses = meds.filter(m => m.type === 'dose'), sym = meds.filter(m => m.type === 'symptom');
+  const measAll = await DB.all('measurements');
+  const meas = measureSummary(measAll.filter(m => inR(m.date)));
+  const health = (await DB.all('health')).filter(h => inR(h.date));
+  const entries = (await DB.all('entries')).filter(e => inR(e.date));
+  const byDay = {}; for (const e of entries) (byDay[e.date] = byDay[e.date] || []).push(e);
+  const dayTotals = Object.values(byDay).map(es => sumNuts(es).t);
+  const navg = k => dayTotals.length ? dayTotals.reduce((a, t) => a + t[k], 0) / dayTotals.length : null;
+  const havg = k => { const v = health.map(h => h[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  const firstDate = rangeDays ? from : [wDays[0]?.date, meds[0]?.date, Object.keys(byDay).sort()[0]].filter(Boolean).sort()[0] || today;
+  const D = d => parseD(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const symAvg = k => sym.length ? sym.reduce((a, x) => a + (x[k] || 0), 0) / sym.length : null;
+  const appCounts = APPETITE.map((l, i) => [l, sym.filter(x => x.appetite === i).length]).filter(x => x[1]);
+  const notes = meds.filter(m => m.other || m.notes);
+  const row = (a, b) => `<tr><td>${a}</td><td style="text-align:right">${b}</td></tr>`;
+  const chart = lineChart([{ pts: wDays, type: 'dots', color: '#1f9d55' }, { pts: movingAvg(allDays).filter(d => inR(d.date)), type: 'line', color: '#0a84ff' }], { goal: num(s.goalWeight), h: 190, label: 'Weight' });
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NutriTrack report ${today}</title>
+<style>body{font:15px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#111;max-width:760px;margin:0 auto;padding:20px;background:#fff}
+h1{font-size:24px;margin:0}h2{font-size:17px;margin:22px 0 8px;border-bottom:2px solid #1f9d55;padding-bottom:4px}table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1px solid #e3e3e3;text-align:left;font-size:14px}
+.muted{color:#666}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.box{border:1px solid #e3e3e3;border-radius:10px;padding:10px;text-align:center}.box b{display:block;font-size:20px}
+@media print{body{padding:0}}</style></head><body>
+<h1>Health &amp; nutrition summary</h1>
+<p class="muted">${esc(D(firstDate))} – ${esc(D(today))} · Created ${esc(new Date().toLocaleString())} with NutriTrack (personal log, self-reported)</p>
+<h2>Weight</h2>
+${wDays.length ? `<div class="grid"><div class="box"><b>${fmt(wDays[0].v, 1)} → ${fmt(wDays[wDays.length - 1].v, 1)}</b>lb this period</div>
+<div class="box"><b>${(wDays[wDays.length - 1].v - wDays[0].v) <= 0 ? '−' : '+'}${fmt(Math.abs(wDays[wDays.length - 1].v - wDays[0].v), 1)} lb</b>change this period</div>
+<div class="box"><b>${ws ? (ws.lost >= 0 ? '−' : '+') + fmt(Math.abs(ws.lost), 1) + ' lb' : '—'}</b>${ws ? fmt(Math.abs(ws.pctLost), 1) + '% since start (' + fmt(ws.start, 1) + ' lb)' : ''}</div></div>
+${chart}<p class="muted" style="font-size:12px">Dots: weigh-ins (${wDays.length}) · Line: 7-day average${num(s.goalWeight) != null ? ' · Dashed: goal ' + fmt(num(s.goalWeight), 1) + ' lb' : ''}</p>
+${ws ? `<p>${esc(ws.trend.text)}</p>` : ''}` : '<p class="muted">No weigh-ins in this period.</p>'}
+${meas.length ? `<h2>Body measurements (inches)</h2><table><tr><th>Site</th><th>First</th><th>Latest</th><th>Change</th></tr>${meas.map(m => `<tr><td>${m.l}</td><td>${fmt(m.first.v, 2)} <span class="muted">(${esc(D(m.first.date))})</span></td><td>${fmt(m.last.v, 2)} <span class="muted">(${esc(D(m.last.date))})</span></td><td>${m.first.date === m.last.date ? '—' : (m.change <= 0 ? '−' : '+') + fmt(Math.abs(m.change), 2)}</td></tr>`).join('')}</table>` : ''}
+<h2>Medication</h2>
+${s.medName ? `<p>Prescribed: <b>${esc(s.medName)}</b> ${esc(s.medDose || '')} (${esc({ weekly: 'once a week', daily: 'daily', other: 'as prescribed' }[s.medSchedule || 'weekly'])})</p>` : ''}
+${doses.length ? `<table><tr><th>Date</th><th>Medication</th><th>Dose</th><th>Site</th></tr>${doses.map(d => `<tr><td>${esc(D(d.date))}</td><td>${esc(d.med)}</td><td>${esc(d.dose)}</td><td>${esc(d.site || '')}</td></tr>`).join('')}</table>` : '<p class="muted">No doses logged in this period.</p>'}
+<h2>Side effects &amp; appetite</h2>
+${sym.length ? `<table>${row('Days with check-ins', sym.length)}${row('Average nausea (0 none – 3 severe)', fmt(symAvg('nausea'), 1))}${row('Average constipation (0 none – 3 severe)', fmt(symAvg('constipation'), 1))}${row('Days with moderate/severe nausea', sym.filter(x => x.nausea >= 2).length)}${row('Days with moderate/severe constipation', sym.filter(x => x.constipation >= 2).length)}${row('Appetite', appCounts.map(([l, n]) => `${esc(l)}: ${n}`).join(', '))}</table>` : '<p class="muted">No check-ins logged in this period.</p>'}
+${notes.length ? `<p><b>Notes</b></p><table>${notes.map(m => `<tr><td style="white-space:nowrap">${esc(D(m.date))}</td><td>${esc([m.other, m.notes].filter(Boolean).join(' — '))}</td></tr>`).join('')}</table>` : ''}
+<h2>Nutrition (daily averages on ${dayTotals.length} logged days)</h2>
+${dayTotals.length ? `<table>${row('Calories', fmt(navg('kcal')) + ' kcal')}${row('Protein', fmt(navg('protein')) + ' g')}${row('Carbohydrates', fmt(navg('carbs')) + ' g')}${row('Fat', fmt(navg('fat')) + ' g')}${row('Fiber', fmt(navg('fiber')) + ' g')}${row('Sodium', fmt(navg('sodium')) + ' mg')}</table>
+<p class="muted" style="font-size:12px">Averages include only days with food logged. Some foods may be missing values, so totals can be low.</p>` : '<p class="muted">No food logged in this period.</p>'}
+${health.length ? `<h2>Activity &amp; sleep (Apple Health, daily averages)</h2><table>${row('Steps', fmt(havg('steps')))}${row('Exercise minutes', fmt(havg('exerciseMin')))}${row('Active calories', fmt(havg('activeKcal')))}${row('Sleep', havg('sleepHrs') != null ? fmt(havg('sleepHrs'), 1) + ' h' : '—')}${row('Resting heart rate', havg('restingHR') != null ? fmt(havg('restingHR')) + ' bpm' : '—')}</table>` : ''}
+<p class="muted" style="font-size:12px; margin-top:24px">Self-tracked information for discussion with a healthcare provider. Not a medical record or medical advice.</p>
+</body></html>`;
+}
+function openReportSheet() {
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Close</button><div class="sheet-title">Progress report</div><span style="width:50px"></span></div>
+    <div class="seg" id="rp-r">${[[30, '30 days'], [90, '90 days'], [0, 'All time']].map(([v, l], i) => `<button data-r="${v}" class="${i === 1 ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="card" style="padding:0; overflow:hidden; margin-top:12px"><iframe id="rp-f" title="Report preview" style="width:100%; height:60vh; border:0; background:#fff"></iframe></div>
+    <div class="stack"><button class="btn primary big" data-act="share">Share or save report</button></div>
+    <p class="tiny muted">Shares a file you can save to Files or OneDrive, print, or send to your provider’s portal. It isn’t encrypted, so share it only where you intend to.</p>`);
+  let range = 90, html = '';
+  const draw = async () => { html = await buildReport(range); $('#rp-f', el).srcdoc = html; };
+  draw();
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.r != null) { range = Number(b.dataset.r); $$('#rp-r button', el).forEach(x => x.classList.toggle('on', x === b)); draw(); return; }
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'share') { try { await shareOrDownload(html, `nutritrack-report-${dateStr()}.html`, 'text/html'); } catch (err) { toast('Could not share: ' + err.message); } }
+  };
 }
 
 // ---------- Settings, backup, privacy ----------
@@ -1337,6 +1842,27 @@ function doRestore() {
   };
   inp.click();
 }
+// Adds dated history (weights, measurements, doses) without replacing anything already in the app.
+function doHistoryImport() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    try {
+      const o = JSON.parse(await f.text());
+      if (o.format !== 'nutritrack-history') throw new Error('This isn’t a NutriTrack history file.');
+      const W = await DB.all('weights'), M = await DB.all('measurements'), D = await DB.all('meds');
+      let nw = 0, nm = 0, nd = 0;
+      for (const w of o.weights || []) if (w.date && num(w.lb) && !W.some(x => x.date === w.date && Math.abs(x.lb - w.lb) < 0.05)) { await DB.put('weights', { id: uid(), date: w.date, lb: num(w.lb), note: w.note || '', source: w.source || 'History', createdAt: Date.now() }); nw++; }
+      for (const m of o.measurements || []) if (m.date && !M.some(x => x.date === m.date)) { const r = { id: uid(), date: m.date, createdAt: Date.now() }; MEASURES.forEach(([k]) => { r[k] = num(m[k]); }); await DB.put('measurements', r); nm++; }
+      for (const d of o.meds || []) if (d.date && !D.some(x => x.type === (d.type || 'dose') && x.date === d.date && (x.dose || '') === (d.dose || ''))) { await DB.put('meds', { id: uid(), type: d.type || 'dose', date: d.date, med: d.med || '', dose: d.dose || '', site: d.site || '', notes: d.notes || '', nausea: d.nausea ?? 0, constipation: d.constipation ?? 0, appetite: d.appetite ?? 2, other: d.other || '', createdAt: Date.now() }); nd++; }
+      let ns = 0;
+      for (const [k, v] of Object.entries(o.settings || {})) if (state.settings[k] == null || state.settings[k] === '') { state.settings[k] = v; ns++; }
+      if (ns) await DB.put('kv', state.settings);
+      closeAllSheets(); toast(`Added ${nw} weigh-ins, ${nm} measurement sets, ${nd} doses`, 4000); render();
+    } catch (e) { toast(e.message, 4000); }
+  };
+  inp.click();
+}
 async function exportCSV() {
   const all = (await DB.all('entries')).sort((a, b) => (a.date + a.createdAt).localeCompare(b.date + b.createdAt));
   const q = x => `"${String(x ?? '').replace(/"/g, '""')}"`;
@@ -1355,17 +1881,19 @@ async function openSettings() {
   const s = state.settings;
   const lb = (await DB.get('kv', 'lastBackup'))?.at;
   let persisted = null; try { persisted = await navigator.storage?.persisted?.(); } catch (e) { /* ignore */ }
-  const goal = (k, l, u) => `<div><label class="f">${l} (${u})</label><input class="in" type="number" inputmode="decimal" data-goal="${k}" value="${s[k]}"></div>`;
+  const goal = (k, l, u) => `<div><label class="f">${l} (${u})</label><input class="in" type="number" inputmode="decimal" step="any" data-goal="${k}" value="${s[k] ?? ''}"></div>`;
   const el = openSheet(`
     <div class="sheet-head"><button class="link" data-act="close">Done</button><div class="sheet-title">Settings</div><span style="width:50px"></span></div>
     <h3>Daily goals</h3>
-    <div class="grid2">${goal('kcal', 'Calories', 'kcal')}${goal('protein', 'Protein', 'g')}${goal('carbs', 'Carbs', 'g')}${goal('fat', 'Fat', 'g')}${goal('fiber', 'Fiber', 'g')}${goal('waterGoal', 'Water', 'oz')}</div>
+    <div class="grid2">${goal('kcal', 'Calories', 'kcal')}${goal('protein', 'Protein', 'g')}${goal('carbs', 'Carbs', 'g')}${goal('fat', 'Fat', 'g')}${goal('fiber', 'Fiber', 'g')}${goal('waterGoal', 'Water', 'oz')}${goal('goalWeight', 'Goal weight', 'lb')}${goal('startWeight', 'Starting weight', 'lb')}${goal('heightIn', 'Height', 'inches')}</div>
+    <p class="tiny muted">Leave starting weight blank to use your first weigh-in.</p>
     <div class="stack"><button class="btn primary" data-act="save-goals">Save goals</button></div>
     <h3>Backup &amp; restore</h3>
     <p class="small muted">Last backup: ${lb ? new Date(lb).toLocaleString() : 'never'}. Backups are encrypted with your passphrase (AES-256) before they leave the app. Save them to OneDrive from the share sheet, and use Restore to move your data to another device, like your Windows PC.</p>
     <div class="stack"><button class="btn secondary" data-act="backup">Create encrypted backup</button>
     <button class="btn secondary" data-act="restore">Restore from backup</button>
-    <button class="btn" data-act="csv">Export diary as spreadsheet (CSV, not encrypted)</button></div>
+    <button class="btn" data-act="csv">Export diary as spreadsheet (CSV, not encrypted)</button>
+    <button class="btn" data-act="history">Import history file (adds, doesn’t replace)</button></div>
     <h3>Privacy</h3>
     <p class="small muted">Your diary, foods and settings are stored only on this device. No account, ads, analytics or trackers. The only data sent out is barcode numbers and search words, to Open Food Facts, to look up products.
     Storage: ${persisted ? 'protected from automatic cleanup.' : 'standard. Add NutriTrack to your Home Screen and open it from there to keep data safest.'}</p>
@@ -1379,11 +1907,12 @@ async function openSettings() {
     const a = b.dataset.act;
     if (a === 'close') closeSheet();
     else if (a === 'save-goals') {
-      $$('[data-goal]', el).forEach(i => { const v = num(i.value); if (v != null && v >= 0) state.settings[i.dataset.goal] = v; });
+      $$('[data-goal]', el).forEach(i => { const k = i.dataset.goal, v = num(i.value); if (k === 'goalWeight' || k === 'startWeight' || k === 'heightIn') state.settings[k] = v != null && v > 0 ? v : null; else if (v != null && v >= 0) state.settings[k] = v; });
       await DB.put('kv', state.settings); toast('Goals saved'); render();
     } else if (a === 'backup') doBackup();
     else if (a === 'restore') doRestore();
     else if (a === 'csv') exportCSV();
+    else if (a === 'history') doHistoryImport();
     else if (a === 'wipe') wipeAll();
   };
 }
@@ -1405,4 +1934,4 @@ async function init() {
 }
 
 if (typeof document !== 'undefined' && document.getElementById('view')) init();
-if (typeof module !== 'undefined') module.exports = { parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
+if (typeof module !== 'undefined') module.exports = { weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
