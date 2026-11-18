@@ -4,7 +4,7 @@
   Local-first PWA: all personal data lives in this device's IndexedDB.
   Only barcode numbers / search words leave the device (sent to Open Food Facts).
 */
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '4.0.0';
 
 // ---------- Constants ----------
 const NUTS = [
@@ -21,7 +21,7 @@ const NUTS = [
 const CORE = ['kcal', 'protein', 'carbs', 'fat'];
 const MEALS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snacks', 'Snacks']];
 const MEAL_LABEL = Object.fromEntries(MEALS);
-const DEFAULT_SETTINGS = { key: 'settings', kcal: 2000, protein: 120, carbs: 200, fat: 65, fiber: 30, waterGoal: 64 };
+const DEFAULT_SETTINGS = { key: 'settings', kcal: 2000, protein: 120, carbs: 200, fat: 65, fiber: 30, waterGoal: 64, sodiumLimit: 2300, satfatLimit: 20, addedSugarLimit: 36 };
 const OFF_BASE = 'https://world.openfoodfacts.org';
 const OFF_FIELDS = 'code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,product_quantity_unit,serving_size,serving_quantity,serving_quantity_unit,nutriments,image_front_small_url,image_front_url,image_url';
 const ZXING_LIBRARY_FALLBACK = 'https://unpkg.com/@zxing/library@0.21/umd/index.min.js';
@@ -51,6 +51,9 @@ const FEATURES = {
     'Medication journal: doses, side effects, appetite',
     'Apple Health import (steps, exercise, sleep, resting heart rate, weight)',
     'Food vs activity vs weight comparison and a shareable progress report',
+    'Trend weight and estimated calorie burn (energy balance)',
+    'Daily and weekly recaps with tips, plus “Ask Claude” sharing',
+    'Limits for sodium, saturated fat and added sugar',
   ],
   planned: [
     'Optional later: automatic sync between iPhone and Windows (needs a private server)',
@@ -365,7 +368,9 @@ async function addWater(date, delta) {
   render();
 }
 async function renderHome() {
-  const date = dateStr(), s = state.settings;
+  const today = dateStr(), s = state.settings;
+  const date = state.homeDate && state.homeDate <= today ? state.homeDate : today;
+  const isToday = date === today;
   const entries = await entriesFor(date);
   const { t, missing } = sumNuts(entries);
   const day = await getDay(date);
@@ -377,53 +382,183 @@ async function renderHome() {
   const lastBackup = (await DB.get('kv', 'lastBackup'))?.at;
   const remaining = s.kcal - t.kcal;
   const quick = [...favs.map(f => ({ f, star: true })), ...recents.map(f => ({ f }))];
-
+  // Week strip (Mon–Sun containing the selected day)
+  const dow = (parseD(date).getDay() + 6) % 7, monday = addDays(date, -dow);
+  const week = [];
+  for (let i = 0; i < 7; i++) { const d = addDays(monday, i); const es = await entriesFor(d); week.push({ d, n: es.length, kcal: sumNuts(es).t.kcal }); }
+  const tips = await buildInsights(date);
+  const R = (pct, color, size, stroke) => { const r = (size - stroke) / 2, c = 2 * Math.PI * r, p = Math.max(0, Math.min(1, pct || 0));
+    return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="transform:rotate(-90deg)"><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="${stroke}"/>
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${(c * (1 - p)).toFixed(1)}"/></svg>`; };
+  const macro = (k, label, color) => `<div class="mini"><div class="mini-ring">${R(s[k] ? t[k] / s[k] : 0, color, 58, 7)}<span>${fmt(t[k])}</span></div><div class="mini-l">${label}</div><div class="mini-g">/ ${fmt(s[k])} g${missing[k] ? ' *' : ''}</div></div>`;
+  const limit = (k, label, unit, lim) => { const v = t[k], pct = lim ? v / lim * 100 : 0; return `<div class="bar-row"><div class="spread"><span>${label}</span><span class="muted"><b style="color:${pct > 100 ? 'var(--orange)' : 'var(--text)'}">${fmt(v)}</b> / ${fmt(lim)} ${unit}</span></div><div class="bar"><i style="width:${Math.min(100, pct)}%; --c:${pct > 100 ? 'var(--orange)' : 'var(--muted)'}"></i></div></div>`; };
   view().innerHTML = `
-  <header class="topbar"><div><div class="eyebrow">${esc(longDate(date))}</div><h1>Today</h1></div>
+  <header class="topbar"><div><div class="eyebrow">${esc(longDate(date))}</div><h1>${isToday ? greeting() : esc(niceDate(date))}</h1></div>
     <button class="icon-btn" data-act="settings" aria-label="Settings">${ICON.gear}</button></header>
+  <div class="weekstrip">${week.map(w => { const p = s.kcal && w.n ? Math.min(1, w.kcal / s.kcal) : 0; const r = 15, c = 2 * Math.PI * r;
+    return `<button class="wday ${w.d === date ? 'sel' : ''} ${w.d > today ? 'future' : ''}" data-day="${w.d}" ${w.d > today ? 'disabled' : ''}><span class="wl">${parseD(w.d).toLocaleDateString(undefined, { weekday: 'narrow' })}</span>
+      <span class="wr"><svg width="36" height="36" viewBox="0 0 36 36" style="transform:rotate(-90deg)"><circle cx="18" cy="18" r="${r}" fill="none" stroke="var(--line)" stroke-width="3"/>${w.n ? `<circle cx="18" cy="18" r="${r}" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${(c * (1 - p)).toFixed(1)}"/>` : ''}</svg><b>${parseD(w.d).getDate()}</b></span></button>`; }).join('')}</div>
 
-  <section class="card ring-card">${ring(s.kcal ? t.kcal / s.kcal : 0, remaining)}
-    <div class="ring-stats"><div><span class="big">${fmt(t.kcal)}</span><span class="lbl">calories eaten${missing.kcal ? ' (some missing)' : ''}</span></div>
-    <div><span class="big">${fmt(s.kcal)}</span><span class="lbl">daily goal</span></div></div></section>
+  <section class="hero">
+    <div class="hero-top"><div class="hero-ring">${R(s.kcal ? t.kcal / s.kcal : 0, remaining < 0 ? '#ffd27a' : '#ffffff', 150, 13)}
+      <div class="hero-c"><div class="hero-big">${fmt(Math.abs(remaining))}</div><div class="hero-sub">${remaining < 0 ? 'over goal' : 'kcal left'}</div></div></div>
+      <div class="hero-stats"><div><b>${fmt(t.kcal)}</b><span>eaten${missing.kcal ? ' *' : ''}</span></div><div><b>${fmt(s.kcal)}</b><span>goal</span></div>
+      <div><b>${fmt(day.waterOz)}<small> oz</small></b><span>water</span></div></div></div>
+    <div class="hero-macros">${macro('protein', 'Protein', '#9fd7ff')}${macro('carbs', 'Carbs', '#ffd27a')}${macro('fat', 'Fat', '#d7b8ff')}${macro('fiber', 'Fiber', '#a8f0d0')}</div>
+    ${CORE.some(k => missing[k]) ? '<div class="hero-note">* some foods don’t list this value</div>' : ''}
+  </section>
 
   <section class="actions">
-    <button class="action hero" data-act="scan">${ICON.barcode}Scan Barcode</button>
-    <button class="action" data-act="add">${ICON.plus}Add Food</button>
-    <button class="action" data-act="label">${ICON.label}Label Photo</button>
-    <button class="action" data-act="meal">${ICON.camera}Meal Photo</button>
-    <button class="action" data-act="recipe">${ICON.recipe}Recipes</button>
+    <button class="action hero-btn" data-act="scan">${ICON.barcode}Scan Barcode</button>
+    <button class="action" data-act="add"><span class="ai" style="--c:#1f9d55">${ICON.plus}</span>Add Food</button>
+    <button class="action" data-act="label"><span class="ai" style="--c:#0a84ff">${ICON.label}</span>Label Photo</button>
+    <button class="action" data-act="meal"><span class="ai" style="--c:#ff9f0a">${ICON.camera}</span>Meal Photo</button>
+    <button class="action" data-act="recipe"><span class="ai" style="--c:#8e5cf7">${ICON.recipe}</span>Recipes</button>
   </section>
 
-  ${quick.length ? `<section class="card"><h2>Quick add</h2><div class="chips">${quick.map(q => `<button class="chip" data-act="quick" data-id="${q.f.id}">${q.star ? '★ ' : ''}${esc(q.f.name)}</button>`).join('')}</div>
-    <p class="tiny muted" style="margin:8px 0 0">Tap a food, then “Add”. Star foods to keep them here.</p></section>` : ''}
+  ${quick.length ? `<section class="card"><div class="spread"><h2 style="margin:0">Quick add</h2><span class="tiny muted">tap · then Add</span></div><div class="chips" style="margin-top:10px">${quick.map(q => `<button class="chip" data-act="quick" data-id="${q.f.id}">${q.star ? '★ ' : ''}${esc(q.f.name)}</button>`).join('')}</div></section>` : ''}
 
-  <section class="card"><h2>Nutrients today</h2>
-    ${macroBar('Protein', t.protein, s.protein, 'g', 'var(--blue)', missing.protein)}
-    ${macroBar('Carbs', t.carbs, s.carbs, 'g', 'var(--orange)', missing.carbs)}
-    ${macroBar('Fat', t.fat, s.fat, 'g', 'var(--purple)', missing.fat)}
-    ${macroBar('Fiber', t.fiber, s.fiber, 'g', 'var(--teal)', missing.fiber)}
-  </section>
+  <section class="card recap"><div class="spread"><h2 style="margin:0">${isToday ? 'Today’s recap' : 'Day recap'}</h2><span class="pill ok">${entries.length} item${entries.length === 1 ? '' : 's'}</span></div>
+    <ul class="tips">${tips.map(x => `<li class="tip ${x.kind}"><span class="ti">${x.icon}</span><span>${x.text}</span></li>`).join('')}</ul>
+    <button class="btn secondary block" data-act="ask-day">✨ Ask Claude about ${isToday ? 'today' : 'this day'}</button></section>
+
+  <section class="card"><h2>Limits</h2>
+    ${limit('sodium', 'Sodium', 'mg', s.sodiumLimit)}${limit('satfat', 'Saturated fat', 'g', s.satfatLimit)}${limit('addedSugar', 'Added sugar', 'g', s.addedSugarLimit)}
+    <p class="tiny muted" style="margin:6px 0 0">Daily upper limits — change them in Settings. Foods that don’t list a value aren’t counted.</p></section>
 
   ${waterCard(day)}
 
   ${pending.length ? `<section class="card"><h2>Scans waiting for internet</h2><p class="small muted">${pending.length} barcode${pending.length > 1 ? 's were' : ' was'} scanned offline.</p>
     <button class="btn secondary block" data-act="tab-scan">Look them up</button></section>` : ''}
-
   ${(!lastBackup || Date.now() - lastBackup > 7 * 864e5) && (entries.length || foods.length) ? `<div class="warnbox">${lastBackup ? 'Your last backup was over a week ago.' : 'You haven’t made a backup yet.'} Your data lives only on this device.
-    <button class="link" data-act="settings">Back up now</button></div>` : ''}
-  `;
+    <button class="link" data-act="settings">Back up now</button></div>` : ''}`;
   view().onclick = async e => {
-    const b = e.target.closest('[data-act]'); if (!b) return;
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.day) { state.homeDate = b.dataset.day; render(); return; }
     const a = b.dataset.act;
     if (a === 'settings') openSettings();
     else if (a === 'scan' || a === 'tab-scan') go('scan');
-    else if (a === 'add') openAddFood({ date: dateStr() });
-    else if (a === 'label') labelPhotoFlow({ then: f => openLogSheet(f, { date: dateStr() }) });
-    else if (a === 'meal') mealPhotoFlow({ date: dateStr() });
+    else if (a === 'add') openAddFood({ date });
+    else if (a === 'label') labelPhotoFlow({ then: f => openLogSheet(f, { date }) });
+    else if (a === 'meal') mealPhotoFlow({ date });
     else if (a === 'recipe') openRecipesList();
     else if (a === 'water') addWater(date, Number(b.dataset.v));
-    else if (a === 'quick') { const f = await DB.get('foods', b.dataset.id); if (f) openLogSheet(f, { date: dateStr() }); }
+    else if (a === 'quick') { const f = await DB.get('foods', b.dataset.id); if (f) openLogSheet(f, { date }); }
+    else if (a === 'ask-day') shareText(await buildDayRecap(date), 'Day recap');
   };
+}
+function greeting() { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; }
+
+// ---------- Insights & recaps (rule-based, free, on-device) ----------
+async function proteinPicks(n = 3) {
+  const foods = (await DB.all('foods')).filter(f => !f.isRecipe || f.perServing);
+  const scored = foods.map(f => { const x = calcNutrients(f, 1, canUseServing(f) ? 'serving' : 'g'); const y = canUseServing(f) ? x : calcNutrients(f, 100, 'g');
+    return { f, p: y.protein, k: y.kcal }; }).filter(o => o.p != null && o.k && o.p >= 8 && o.p * 4 / o.k >= 0.25)
+    .sort((a, b) => (b.p * 4 / b.k) - (a.p * 4 / a.k) || (b.f.useCount || 0) - (a.f.useCount || 0));
+  return scored.slice(0, n).map(o => `${esc(o.f.name)} (${fmt(o.p)} g protein, ${fmt(o.k)} kcal)`);
+}
+async function fiberPicks(n = 3) {
+  const foods = await DB.all('foods');
+  return foods.map(f => { const x = canUseServing(f) ? calcNutrients(f, 1, 'serving') : calcNutrients(f, 100, 'g'); return { f, fi: x.fiber }; })
+    .filter(o => o.fi != null && o.fi >= 3).sort((a, b) => b.fi - a.fi).slice(0, n).map(o => `${esc(o.f.name)} (${fmt(o.fi)} g)`);
+}
+async function buildInsights(date) {
+  const s = state.settings, today = dateStr(), isToday = date === today;
+  const entries = await entriesFor(date), { t, missing } = sumNuts(entries), day = await getDay(date);
+  const h = new Date().getHours(), meals = new Set(entries.map(e => e.meal)).size;
+  const out = [];
+  if (!entries.length) {
+    out.push({ kind: 'info', icon: '🍽️', text: isToday ? 'Nothing logged yet. Scanning a barcode is the fastest start.' : 'Nothing was logged this day.' });
+    return out;
+  }
+  const late = !isToday || h >= 18;
+  const pr = s.protein ? t.protein / s.protein : 1;
+  if (pr >= 0.9) out.push({ kind: 'good', icon: '💪', text: `Protein ${fmt(t.protein)} g — ${pr >= 1 ? 'goal reached' : 'nearly there'}. That helps protect muscle while losing weight.` });
+  else if (late || meals >= 2) {
+    const picks = await proteinPicks();
+    out.push({ kind: 'act', icon: '🥩', text: `Protein is ${fmt(s.protein - t.protein)} g under goal.${picks.length ? ' High-protein options from your foods: ' + picks.join(', ') + '.' : ''}` });
+  }
+  if (late && s.fiber && t.fiber < s.fiber * 0.6) {
+    const picks = await fiberPicks();
+    out.push({ kind: 'act', icon: '🥦', text: `Fiber ${fmt(t.fiber)} g of ${fmt(s.fiber)} g. Fiber and water can help with constipation.${picks.length ? ' Higher-fiber foods you have: ' + picks.join(', ') + '.' : ''}` });
+  }
+  if (s.sodiumLimit && t.sodium > s.sodiumLimit) out.push({ kind: 'warn', icon: '🧂', text: `Sodium ${fmt(t.sodium)} mg is over your ${fmt(s.sodiumLimit)} mg limit. Expect a temporary water-weight bump on the scale tomorrow.` });
+  if (s.waterGoal && (late || h >= 15) && day.waterOz < s.waterGoal * 0.5) out.push({ kind: 'act', icon: '💧', text: `Water ${fmt(day.waterOz)} of ${fmt(s.waterGoal)} oz — hydration matters more on a GLP-1 medication.` });
+  const rem = s.kcal - t.kcal;
+  if (late && rem < -150) out.push({ kind: 'info', icon: '📊', text: `${fmt(-rem)} kcal over goal. One day doesn’t move the trend — the weekly average is what counts.` });
+  else if (late && rem > s.kcal * 0.4 && meals >= 2) out.push({ kind: 'info', icon: '📊', text: `Only ${fmt(t.kcal)} kcal logged. If that’s complete, very low days can make it harder to keep muscle — if not, add what’s missing so the trend stays accurate.` });
+  if (CORE.some(k => missing[k])) out.push({ kind: 'info', icon: '⚠️', text: 'Some foods are missing values, so totals may read low.' });
+  if (isToday) {
+    const ws = await DB.all('weights'); const lastW = ws.map(w => w.date).sort().pop();
+    if (!lastW || daysBetween(lastW, today) >= 7) out.push({ kind: 'act', icon: '⚖️', text: `No weigh-in ${lastW ? 'for ' + daysBetween(lastW, today) + ' days' : 'yet'}. A few weigh-ins a week make your trend reliable.` });
+  }
+  if (!out.some(x => x.kind === 'act' || x.kind === 'warn')) out.push({ kind: 'good', icon: '✅', text: 'Solid day so far — nothing needs attention.' });
+  return out;
+}
+const plain = html => String(html).replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+async function buildDayRecap(date) {
+  const s = state.settings, entries = await entriesFor(date), { t } = sumNuts(entries), day = await getDay(date);
+  const lines = [`NutriTrack recap — ${longDate(date)}`, '', `Goals: ${fmt(s.kcal)} kcal, protein ${fmt(s.protein)} g, carbs ${fmt(s.carbs)} g, fat ${fmt(s.fat)} g, fiber ${fmt(s.fiber)} g, water ${fmt(s.waterGoal)} oz`,
+    `Totals: ${fmt(t.kcal)} kcal, protein ${fmt(t.protein)} g, carbs ${fmt(t.carbs)} g, fat ${fmt(t.fat)} g, fiber ${fmt(t.fiber)} g, sodium ${fmt(t.sodium)} mg, sat fat ${fmt(t.satfat)} g, added sugar ${fmt(t.addedSugar)} g, water ${fmt(day.waterOz)} oz`, ''];
+  for (const [m, l] of MEALS) { const es = entries.filter(e => e.meal === m); if (!es.length) continue;
+    lines.push(`${l}:`); for (const e of es) lines.push(`- ${e.food?.name || 'Food'}${e.food?.brand ? ' (' + e.food.brand + ')' : ''}, ${amountLabel(e)}: ${fmt(e.nutrients?.kcal)} kcal, ${fmt(e.nutrients?.protein)} g protein${e.estimate ? ' [estimate]' : ''}`); }
+  const meds = (await DB.all('meds')).filter(m => m.date === date);
+  for (const m of meds) lines.push(m.type === 'dose' ? `Dose: ${m.med} ${m.dose}` : `Check-in: appetite ${APPETITE[m.appetite]}, nausea ${SEVERITY[m.nausea]}, constipation ${SEVERITY[m.constipation]}${m.other ? ', ' + m.other : ''}`);
+  const w = (await DB.all('weights')).filter(x => x.date === date).pop(); if (w) lines.push(`Weight: ${fmt(w.lb, 1)} lb`);
+  const h = await DB.get('health', date); if (h) lines.push(`Activity: ${fmt(h.steps)} steps, sleep ${h.sleepHrs ?? '—'} h, resting HR ${h.restingHR ?? '—'}`);
+  lines.push('', 'Please give me a short recap of this day and 2–3 practical food suggestions for tomorrow, based on what I actually eat. Don’t suggest medication changes.');
+  return lines.join('\n');
+}
+async function buildWeekRecap() {
+  const s = state.settings, today = dateStr(), lines = [`NutriTrack weekly recap — ${longDate(addDays(today, -6))} to ${longDate(today)}`, ''];
+  let logged = 0; const sums = { kcal: 0, protein: 0, fiber: 0, sodium: 0 };
+  for (let i = 6; i >= 0; i--) { const d = addDays(today, -i); const es = await entriesFor(d); const { t } = sumNuts(es); const h = await DB.get('health', d) || {}; const day = await getDay(d);
+    if (es.length) { logged++; for (const k in sums) sums[k] += t[k]; }
+    lines.push(`${parseD(d).toLocaleDateString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric' })}: ${es.length ? `${fmt(t.kcal)} kcal, ${fmt(t.protein)} g protein, ${fmt(t.fiber)} g fiber, ${fmt(t.sodium)} mg sodium, ${fmt(day.waterOz)} oz water` : 'not logged'}${h.steps != null ? `, ${fmt(h.steps)} steps` : ''}${h.sleepHrs != null ? `, ${h.sleepHrs} h sleep` : ''}`); }
+  lines.push('', `Logged ${logged} of 7 days. Averages on logged days: ${logged ? fmt(sums.kcal / logged) : '—'} kcal, ${logged ? fmt(sums.protein / logged) : '—'} g protein, ${logged ? fmt(sums.fiber / logged) : '—'} g fiber (goals ${fmt(s.kcal)} / ${fmt(s.protein)} / ${fmt(s.fiber)}).`);
+  const days = lastPerDay(await DB.all('weights'), 'lb'), ws = weightStats(days, s), tr = trendSeries(days);
+  if (ws) lines.push(`Weight: latest ${fmt(ws.last.v, 1)} lb (${ws.last.date}), trend ${fmt(tr[tr.length - 1].v, 1)} lb, ${fmt(ws.lost, 1)} lb lost since ${fmt(ws.start, 1)} lb. ${ws.trend.text}`);
+  const ex = await expenditureEstimate(); if (ex.ok) lines.push(`Estimated expenditure: about ${fmt(ex.tdee)} kcal/day (from ${ex.loggedDays} logged days and weight trend).`);
+  const meds = (await DB.all('meds')).filter(m => m.date > addDays(today, -7)).sort((a, b) => a.date.localeCompare(b.date));
+  for (const m of meds) lines.push(m.type === 'dose' ? `Dose ${m.date}: ${m.med} ${m.dose}` : `Check-in ${m.date}: appetite ${APPETITE[m.appetite]}, nausea ${SEVERITY[m.nausea]}, constipation ${SEVERITY[m.constipation]}${m.other ? ', ' + m.other : ''}`);
+  lines.push('', 'Please give me a weekly recap: what went well, patterns you notice, and 3 practical changes for next week based on the foods I actually eat. Flag anything worth discussing with my doctor, but don’t suggest medication changes.');
+  return lines.join('\n');
+}
+async function shareText(text, title) {
+  try {
+    if (navigator.share) { await navigator.share({ title, text }); return; }
+  } catch (e) { if (e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text); toast('Copied — paste it into your chat with Claude', 3500); }
+  catch (e) {
+    const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Done</button><div class="sheet-title">Copy this recap</div><span style="width:50px"></span></div><textarea class="in" style="height:60vh; font-size:14px">${esc(text)}</textarea>`);
+    el.onclick = ev => { if (ev.target.closest('[data-act="close"]')) closeSheet(); };
+  }
+}
+
+// ---------- Trend weight & expenditure (MacroFactor-style, simplified) ----------
+// Exponentially smoothed weight: each weigh-in moves the trend 10% per day elapsed, so single-day swings barely move it.
+function trendSeries(days) {
+  const out = []; let tr = null, prev = null;
+  for (const d of days) {
+    if (tr == null) tr = d.v;
+    else { const gap = Math.max(1, daysBetween(prev, d.date)); const a = 1 - Math.pow(0.9, gap); tr = tr + a * (d.v - tr); }
+    prev = d.date; out.push({ date: d.date, v: tr });
+  }
+  return out;
+}
+function trendAt(tr, date) { const p = tr.filter(x => x.date <= date).pop(); return p ? p.v : null; }
+async function expenditureEstimate(windowDays = 28) {
+  const today = dateStr(), start = addDays(today, -(windowDays - 1));
+  const days = lastPerDay(await DB.all('weights'), 'lb'), tr = trendSeries(days);
+  const inWin = days.filter(d => d.date >= start);
+  let logged = 0, kcal = 0;
+  for (let i = 0; i < windowDays; i++) { const es = await entriesFor(addDays(start, i)); if (es.length) { logged++; kcal += sumNuts(es).t.kcal; } }
+  const need = Math.ceil(windowDays * 0.7);
+  if (logged < need || inWin.length < 4) return { ok: false, loggedDays: logged, needDays: need, weighIns: inWin.length };
+  const w0 = trendAt(tr, inWin[0].date), w1 = trendAt(tr, inWin[inWin.length - 1].date);
+  const span = Math.max(7, daysBetween(inWin[0].date, inWin[inWin.length - 1].date));
+  const tdee = kcal / logged - (w1 - w0) * 3500 / span;
+  return { ok: true, tdee, intake: kcal / logged, loggedDays: logged, rate: (w1 - w0) / span * 7 };
 }
 
 // ---------- Diary ----------
@@ -438,7 +573,7 @@ async function renderDiary() {
   const meal = m => {
     const list = entries.filter(e => e.meal === m);
     const kc = list.reduce((s, e) => s + (e.nutrients?.kcal || 0), 0);
-    return `<section class="card"><div class="meal-head"><h2>${MEAL_LABEL[m]}</h2>
+    return `<section class="card meal m-${m}"><div class="meal-head"><h2><span class="meal-ic">${{ breakfast: '🍳', lunch: '🥗', dinner: '🍽️', snacks: '🍎' }[m]}</span>${MEAL_LABEL[m]}</h2>
       <div class="row"><span class="muted small">${list.length ? fmt(kc) + ' kcal' : ''}</span>
       <button class="icon-btn" style="background:var(--accent-soft); color:var(--accent)" data-act="add" data-meal="${m}" aria-label="Add to ${MEAL_LABEL[m]}">${ICON.plus}</button></div></div>
       ${list.length ? `<ul class="list">${list.map(e => `<li><button class="item" data-act="entry" data-id="${e.id}">
@@ -1367,6 +1502,8 @@ async function renderProgress() {
   const weights = await DB.all('weights');
   const days = lastPerDay(weights, 'lb');
   const ws = weightStats(days, s);
+  const tr = trendSeries(days);
+  const ex = await expenditureEstimate();
   const shown = range === 'all' ? days : days.filter(d => d.date >= addDays(today, -range));
   const meas = measureSummary(await DB.all('measurements'));
   const health = Object.fromEntries((await DB.all('health')).map(h => [h.date, h]));
@@ -1382,11 +1519,11 @@ async function renderProgress() {
   <section class="card"><div class="spread"><h2 style="margin:0">Weight</h2><button class="btn secondary" data-act="weight">+ Log weight</button></div>
     ${ws ? `<div class="totals" style="grid-template-columns:repeat(3,1fr); margin-top:12px">
       <div><div class="big">${fmt(ws.last.v, 1)}</div><div class="lbl">latest (lb)</div></div>
-      <div><div class="big">${fmt(ws.avg7, 1)}</div><div class="lbl">7-day avg</div></div>
+      <div><div class="big">${fmt(tr[tr.length - 1].v, 1)}</div><div class="lbl">trend weight</div></div>
       <div><div class="big">${ws.lost >= 0 ? '−' : '+'}${fmt(Math.abs(ws.lost), 1)}</div><div class="lbl">${fmt(Math.abs(ws.pctLost), 1)}% ${ws.lost >= 0 ? 'lost' : 'gained'}</div></div></div>
       <div class="seg" style="margin:14px 0 6px">${[[30, '30 days'], [90, '90 days'], ['all', 'All']].map(([v, l]) => `<button data-range="${v}" class="${String(range) === String(v) ? 'on' : ''}">${l}</button>`).join('')}</div>
-      ${lineChart([{ pts: shown.map(d => ({ date: d.date, v: d.v })), type: 'dots', color: '#1f9d55' }, { pts: movingAvg(days).filter(d => shown.some(x => x.date === d.date)), type: 'line', color: '#0a84ff' }], { goal: num(s.goalWeight), label: 'Weight chart' })}
-      <p class="tiny muted" style="margin:4px 0 10px">Dots: weigh-ins · Blue line: 7-day average${num(s.goalWeight) != null ? ' · Dashed: goal' : ''}</p>
+      ${lineChart([{ pts: shown.map(d => ({ date: d.date, v: d.v })), type: 'dots', color: '#1f9d55' }, { pts: tr.filter(d => shown.some(x => x.date === d.date)), type: 'line', color: '#0a84ff' }], { goal: num(s.goalWeight), label: 'Weight chart' })}
+      <p class="tiny muted" style="margin:4px 0 10px">Dots: weigh-ins · Blue line: trend weight (smoothed so single days don’t mislead)${num(s.goalWeight) != null ? ' · Dashed: goal' : ''}</p>
       <div class="kv" style="border-top:0"><span class="muted">Starting weight</span><span>${fmt(ws.start, 1)} lb${num(s.startWeight) == null ? ' (first weigh-in, ' + esc(niceDate(ws.first.date)) + ')' : ''}</span></div>
       <div class="kv"><span class="muted">30-day change (7-day avg)</span><span>${ws.change30 == null ? 'needs 30 days' : (ws.change30 <= 0 ? '−' : '+') + fmt(Math.abs(ws.change30), 1) + ' lb'}</span></div>
       ${num(s.heightIn) ? `<div class="kv"><span class="muted">BMI (latest · at start)</span><span>${fmt(703 * ws.last.v / num(s.heightIn) ** 2, 1)} · ${fmt(703 * ws.start / num(s.heightIn) ** 2, 1)}</span></div>` : ''}
@@ -1394,6 +1531,14 @@ async function renderProgress() {
       <div class="warnbox" style="margin:12px 0 0">${esc(ws.trend.text)}</div>`
       : `<p class="small muted">Log your first weigh-in to start tracking. Set a goal and starting weight in Settings (gear on Home).</p>`}
   </section>
+  <section class="card"><h2>Energy balance</h2>
+    ${ex.ok ? `<div class="totals" style="grid-template-columns:repeat(3,1fr)"><div><div class="big">${fmt(ex.tdee, 0)}</div><div class="lbl">est. burn / day</div></div>
+      <div><div class="big">${fmt(ex.intake)}</div><div class="lbl">avg eaten</div></div><div><div class="big">${ex.rate <= 0 ? '−' : '+'}${fmt(Math.abs(ex.rate), 1)}</div><div class="lbl">lb / week</div></div></div>
+      <p class="tiny muted" style="margin:10px 0 0">Estimated from your last 28 days of logged food and your trend weight (like MacroFactor). It’s only as accurate as your logging — skipped snacks make it read low.</p>`
+      : `<p class="small muted" style="margin:0">Once you’ve logged food on ${ex.needDays} of the last 28 days and weighed in at least 4 times, the app estimates how many calories you actually burn — the best way to see if a plateau is real. So far: ${ex.loggedDays} logged days, ${ex.weighIns} weigh-ins.</p>`}
+  </section>
+  <section class="card recap"><h2>Weekly recap</h2><p class="small muted" style="margin-top:0">A summary of your last 7 days — food, weight trend, doses and activity — ready to paste into your chat with Claude for patterns and suggestions.</p>
+    <button class="btn secondary block" data-act="ask-week">✨ Ask Claude about this week</button></section>
   <section class="card"><div class="spread"><h2 style="margin:0">Measurements</h2><button class="btn secondary" data-act="measure">+ Log</button></div>
     ${meas.length ? meas.map(m => { const fd = esc(parseD(m.first.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }));
       return `<div class="kv"><span>${m.l}</span><span>${fmt(m.last.v, 2)} in <span class="muted small">(${m.first.date === m.last.date ? 'measured ' + fd : (m.change <= 0 ? '−' : '+') + fmt(Math.abs(m.change), 2) + ' since ' + fd})</span></span></div>`; }).join('')
@@ -1419,6 +1564,7 @@ async function renderProgress() {
     if (a === 'weight') openWeightSheet();
     else if (a === 'measure') openMeasureSheet();
     else if (a === 'report') openReportSheet();
+    else if (a === 'ask-week') buildWeekRecap().then(t => shareText(t, 'Weekly recap'));
   };
 }
 
@@ -1718,7 +1864,7 @@ async function buildReport(rangeDays) {
   const appCounts = APPETITE.map((l, i) => [l, sym.filter(x => x.appetite === i).length]).filter(x => x[1]);
   const notes = meds.filter(m => m.other || m.notes);
   const row = (a, b) => `<tr><td>${a}</td><td style="text-align:right">${b}</td></tr>`;
-  const chart = lineChart([{ pts: wDays, type: 'dots', color: '#1f9d55' }, { pts: movingAvg(allDays).filter(d => inR(d.date)), type: 'line', color: '#0a84ff' }], { goal: num(s.goalWeight), h: 190, label: 'Weight' });
+  const chart = lineChart([{ pts: wDays, type: 'dots', color: '#1f9d55' }, { pts: trendSeries(allDays).filter(d => inR(d.date)), type: 'line', color: '#0a84ff' }], { goal: num(s.goalWeight), h: 190, label: 'Weight' });
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NutriTrack report ${today}</title>
 <style>body{font:15px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#111;max-width:760px;margin:0 auto;padding:20px;background:#fff}
 h1{font-size:24px;margin:0}h2{font-size:17px;margin:22px 0 8px;border-bottom:2px solid #1f9d55;padding-bottom:4px}table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1px solid #e3e3e3;text-align:left;font-size:14px}
@@ -1730,7 +1876,7 @@ h1{font-size:24px;margin:0}h2{font-size:17px;margin:22px 0 8px;border-bottom:2px
 ${wDays.length ? `<div class="grid"><div class="box"><b>${fmt(wDays[0].v, 1)} → ${fmt(wDays[wDays.length - 1].v, 1)}</b>lb this period</div>
 <div class="box"><b>${(wDays[wDays.length - 1].v - wDays[0].v) <= 0 ? '−' : '+'}${fmt(Math.abs(wDays[wDays.length - 1].v - wDays[0].v), 1)} lb</b>change this period</div>
 <div class="box"><b>${ws ? (ws.lost >= 0 ? '−' : '+') + fmt(Math.abs(ws.lost), 1) + ' lb' : '—'}</b>${ws ? fmt(Math.abs(ws.pctLost), 1) + '% since start (' + fmt(ws.start, 1) + ' lb)' : ''}</div></div>
-${chart}<p class="muted" style="font-size:12px">Dots: weigh-ins (${wDays.length}) · Line: 7-day average${num(s.goalWeight) != null ? ' · Dashed: goal ' + fmt(num(s.goalWeight), 1) + ' lb' : ''}</p>
+${chart}<p class="muted" style="font-size:12px">Dots: weigh-ins (${wDays.length}) · Line: trend weight${num(s.goalWeight) != null ? ' · Dashed: goal ' + fmt(num(s.goalWeight), 1) + ' lb' : ''}</p>
 ${ws ? `<p>${esc(ws.trend.text)}</p>` : ''}` : '<p class="muted">No weigh-ins in this period.</p>'}
 ${meas.length ? `<h2>Body measurements (inches)</h2><table><tr><th>Site</th><th>First</th><th>Latest</th><th>Change</th></tr>${meas.map(m => `<tr><td>${m.l}</td><td>${fmt(m.first.v, 2)} <span class="muted">(${esc(D(m.first.date))})</span></td><td>${fmt(m.last.v, 2)} <span class="muted">(${esc(D(m.last.date))})</span></td><td>${m.first.date === m.last.date ? '—' : (m.change <= 0 ? '−' : '+') + fmt(Math.abs(m.change), 2)}</td></tr>`).join('')}</table>` : ''}
 <h2>Medication</h2>
@@ -1885,7 +2031,7 @@ async function openSettings() {
   const el = openSheet(`
     <div class="sheet-head"><button class="link" data-act="close">Done</button><div class="sheet-title">Settings</div><span style="width:50px"></span></div>
     <h3>Daily goals</h3>
-    <div class="grid2">${goal('kcal', 'Calories', 'kcal')}${goal('protein', 'Protein', 'g')}${goal('carbs', 'Carbs', 'g')}${goal('fat', 'Fat', 'g')}${goal('fiber', 'Fiber', 'g')}${goal('waterGoal', 'Water', 'oz')}${goal('goalWeight', 'Goal weight', 'lb')}${goal('startWeight', 'Starting weight', 'lb')}${goal('heightIn', 'Height', 'inches')}</div>
+    <div class="grid2">${goal('kcal', 'Calories', 'kcal')}${goal('protein', 'Protein', 'g')}${goal('carbs', 'Carbs', 'g')}${goal('fat', 'Fat', 'g')}${goal('fiber', 'Fiber', 'g')}${goal('waterGoal', 'Water', 'oz')}${goal('goalWeight', 'Goal weight', 'lb')}${goal('startWeight', 'Starting weight', 'lb')}${goal('heightIn', 'Height', 'inches')}${goal('sodiumLimit', 'Sodium limit', 'mg')}${goal('satfatLimit', 'Sat. fat limit', 'g')}${goal('addedSugarLimit', 'Added sugar limit', 'g')}</div>
     <p class="tiny muted">Leave starting weight blank to use your first weigh-in.</p>
     <div class="stack"><button class="btn primary" data-act="save-goals">Save goals</button></div>
     <h3>Backup &amp; restore</h3>
@@ -1921,7 +2067,7 @@ async function openSettings() {
 async function init() {
   await loadSettings();
   try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) { /* ignore */ }
-  $('#tabbar').onclick = e => { const b = e.target.closest('[data-tab]'); if (b) { closeAllSheets(); go(b.dataset.tab); } };
+  $('#tabbar').onclick = e => { const b = e.target.closest('[data-tab]'); if (b) { closeAllSheets(); if (b.dataset.tab === 'home') state.homeDate = null; go(b.dataset.tab); } };
   $('#backdrop').onclick = () => closeSheet();
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { Scanner.stop(); return; }
@@ -1934,4 +2080,4 @@ async function init() {
 }
 
 if (typeof document !== 'undefined' && document.getElementById('view')) init();
-if (typeof module !== 'undefined') module.exports = { weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
+if (typeof module !== 'undefined') module.exports = { trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };

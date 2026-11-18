@@ -165,6 +165,57 @@ input.in:focus{outline:2px solid var(--accent)}
 .week .b.empty{background:var(--card2)}
 .goal-line{position:absolute; left:0; right:0; border-top:2px dashed var(--orange); opacity:.8}
 .status-list{margin:0; padding-left:20px} .status-list li{margin:4px 0}
+
+/* ===== v4 visual refresh ===== */
+:root{ --radius:20px; --shadow:0 1px 2px rgba(0,0,0,.04), 0 6px 20px rgba(0,0,0,.05); }
+@media (prefers-color-scheme: dark){ :root{ --shadow:none; } }
+.card{box-shadow:var(--shadow)}
+.card h2{font-size:19px; letter-spacing:-.01em}
+.topbar h1{font-size:30px}
+.weekstrip{display:grid; grid-template-columns:repeat(7,1fr); gap:4px; margin:0 0 14px}
+.wday{background:none; border:0; display:flex; flex-direction:column; align-items:center; gap:4px; padding:6px 0; border-radius:14px; color:var(--muted)}
+.wday .wl{font-size:12px; font-weight:700}
+.wday .wr{position:relative; width:36px; height:36px; display:grid; place-items:center}
+.wday .wr svg{position:absolute; inset:0}
+.wday .wr b{font-size:14px; color:var(--text)}
+.wday.sel{background:var(--card); box-shadow:var(--shadow)}
+.wday.sel .wl{color:var(--accent)}
+.wday.future{opacity:.35}
+.hero{border-radius:24px; padding:18px 16px 14px; margin-bottom:14px; color:#fff;
+  background:radial-gradient(120% 140% at 0% 0%, #2fc675 0%, #169a63 45%, #0d7d6c 100%); box-shadow:0 10px 30px rgba(22,154,99,.30)}
+@media (prefers-color-scheme: dark){ .hero{background:radial-gradient(120% 140% at 0% 0%, #1f8f57 0%, #0f6f4b 50%, #0a5650 100%); box-shadow:none} }
+.hero-top{display:flex; align-items:center; gap:16px}
+.hero-ring{position:relative; width:150px; height:150px; flex:none}
+.hero-c{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center}
+.hero-big{font-size:36px; font-weight:800; letter-spacing:-.03em; line-height:1}
+.hero-sub{font-size:13px; opacity:.85; margin-top:4px; font-weight:600}
+.hero-stats{display:grid; gap:10px; flex:1}
+.hero-stats div{display:flex; flex-direction:column}
+.hero-stats b{font-size:22px; font-weight:800; letter-spacing:-.02em} .hero-stats b small{font-size:13px; font-weight:700; opacity:.85}
+.hero-stats span{font-size:12px; opacity:.8; font-weight:600; text-transform:uppercase; letter-spacing:.04em}
+.hero-macros{display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:14px; padding-top:14px; border-top:1px solid rgba(255,255,255,.18)}
+.mini{display:flex; flex-direction:column; align-items:center; text-align:center}
+.mini-ring{position:relative; width:58px; height:58px}
+.mini-ring span{position:absolute; inset:0; display:grid; place-items:center; font-weight:800; font-size:15px}
+.mini-l{font-size:13px; font-weight:700; margin-top:4px}
+.mini-g{font-size:11px; opacity:.8}
+.hero-note{font-size:11px; opacity:.8; margin-top:8px; text-align:center}
+.actions{grid-template-columns:repeat(4,1fr); gap:8px}
+.action{min-height:86px; padding:12px 6px; align-items:center; justify-content:center; gap:8px; text-align:center; font-size:13px; box-shadow:var(--shadow)}
+.action .ai{width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:color-mix(in srgb, var(--c) 14%, transparent); color:var(--c)}
+.action .ai svg{width:22px; height:22px; color:var(--c)}
+.action.hero-btn{grid-column:1/-1; flex-direction:row; min-height:60px; font-size:18px; background:var(--text); color:var(--bg); gap:10px}
+.action.hero-btn svg{width:28px; height:28px; color:var(--bg)}
+.chip{background:var(--accent-soft); color:var(--accent)}
+.tips{list-style:none; margin:10px 0 12px; padding:0; display:grid; gap:8px}
+.tip{display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border-radius:14px; background:var(--card2); font-size:15px; line-height:1.35}
+.tip .ti{font-size:18px; line-height:1.2}
+.tip.good{background:var(--accent-soft)}
+.tip.warn{background:var(--warn-bg); color:var(--warn-ink)}
+.meal{border-left:5px solid var(--mc, var(--accent))}
+.m-breakfast{--mc:#ff9f0a} .m-lunch{--mc:#1f9d55} .m-dinner{--mc:#0a84ff} .m-snacks{--mc:#8e5cf7}
+.meal-ic{margin-right:8px}
+.btn{border-radius:14px}
 </style>
 </head>
 <body>

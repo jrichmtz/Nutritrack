@@ -1,5 +1,5 @@
 /* NutriTrack service worker — offline app shell. Personal data is never cached here (it lives in IndexedDB). */
-const CACHE = 'nutritrack-v3.0.0';
+const CACHE = 'nutritrack-v4.0.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 const CDN = ['https://unpkg.com/@zxing/browser@0.1/umd/zxing-browser.min.js'];
 
@@ -32,7 +32,7 @@ self.addEventListener('fetch', e => {
   if (url.origin === self.location.origin) {
     e.respondWith((async () => {
       try {
-        const r = await fetch(req);
+        const r = await fetch(req, { cache: 'no-cache' }); // always ask the server for the newest version
         if (r.ok) { const c = await caches.open(CACHE); c.put(req, r.clone()); }
         return r;
       } catch (err) {
