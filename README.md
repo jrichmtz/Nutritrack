@@ -1,4 +1,4 @@
-# NutriTrack: Phase 1
+# NutriTrack: Phase 2
 
 A private nutrition tracker for iPhone, built as a Progressive Web App (PWA). It also opens in Edge or Chrome on Windows.
 
@@ -35,8 +35,9 @@ Total recurring cost: **$0**. You don't need an Apple Developer account, a paid 
 
 **Working now:** live barcode scanning; reading a barcode from a photo or typing it in; Open Food Facts lookup; serving sizes and quantities in servings or grams; the daily diary; saved, favorite, recent, and frequent foods; custom foods and correcting records; copying the previous day or repeating a meal; goals for calories, macros, fiber, and water; a 7-day calorie chart; offline use; pending scans saved while offline; encrypted backup and restore; CSV export; deleting all data.
 
+**Added in Phase 2:** nutrition-label photos read on your phone by Tesseract.js (free; about 15 MB downloads once), always followed by a review screen; recipes with nutrition per serving and per gram; meal photos combined with your saved foods or quick estimates, which are marked “estimate”.
+
 **Planned**
-- **Phase 2:** nutrition-label photo with on-device OCR (Tesseract.js, free), recipes, and a meal-photo workflow.
 - **Phase 3:** weight and measurements, a medication journal, Apple Health import, and reports.
 
 ## Known limitations

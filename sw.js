@@ -1,5 +1,5 @@
 /* NutriTrack service worker — offline app shell. Personal data is never cached here (it lives in IndexedDB). */
-const CACHE = 'nutritrack-v1.0.0';
+const CACHE = 'nutritrack-v2.0.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 const CDN = ['https://unpkg.com/@zxing/browser@0.1/umd/zxing-browser.min.js'];
 
@@ -42,8 +42,8 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // Barcode library from the CDN: cache first, so scanning works offline after the first load.
-  if (url.hostname === 'unpkg.com') {
+  // Barcode and text-reading libraries from CDNs: cache first, so scanning works offline after the first load.
+  if (url.hostname === 'unpkg.com' || url.hostname === 'cdn.jsdelivr.net' || url.hostname === 'tessdata.projectnaptha.com') {
     e.respondWith((async () => {
       const c = await caches.open(CACHE);
       const hit = await c.match(req);
