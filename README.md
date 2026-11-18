@@ -1,4 +1,4 @@
-# NutriTrack 4.1
+# NutriTrack 6.0
 
 A private nutrition tracker for iPhone, built as a Progressive Web App (PWA). It also opens in Edge or Chrome on Windows.
 
@@ -42,6 +42,12 @@ Total recurring cost: **$0**. You don't need an Apple Developer account, a paid 
 **Added in 4.0:** a redesigned look with a week strip, rings, and meal colors; trend weight; an estimate of calories burned (energy balance); limits for sodium, saturated fat, and added sugar; daily and weekly recaps with tips drawn from your own foods; and “Ask Claude” sharing. Updates now load the next time you open the app.
 
 **Added in 4.1:** type-a-food search across your saved foods, USDA common and restaurant foods, and Open Food Facts brands; quick calories with “save to my foods”. USDA search works out of the box with a shared demo key; a free personal key (api.data.gov/signup) removes the limit.
+
+**Added in 5.0:** an estimated Wegovy level chart from logged doses (illustration only, based on the ~1-week half-life); side-effect trend chart; progress photos with before/after comparison (stored only on the phone and included in encrypted backups); a daily habit tracker showing “x of last 7 days” with no streaks.
+
+**Added in 5.1:** choose units when logging (servings, USDA portions like “1 large egg” or “1 cup”, oz, grams, and your own saved units); recommended targets from your stats (Mifflin–St Jeor and activity; protein about 1.5 g/kg of adjusted body weight; calorie floors of 1,500 for men and 1,200 for women); a weekly check-in that suggests calorie changes from your measured burn, at most 250 kcal at a time, keeping protein fixed. The injection-site map was removed.
+
+**Added in 6.0:** a health profile with conditions and a full medication list (statuses: taking, confirm, stopped); personalized guidance based on your medications, conditions, blood pressure and labs (for example: BP medicines and weight loss, avoiding potassium salt substitutes on losartan, hydration with a diuretic plus Wegovy, exercise effort on a beta-blocker, B12 with metformin); a blood pressure log with ACC/AHA categories, chart and safety prompts; lab results with common reference ranges and trends; targets that account for your conditions (sodium for high blood pressure, protein for kidney disease); health context added to recaps; meds, BP and labs added to the provider report.
 
 **Planned (optional, later)**: automatic sync between iPhone and Windows through a private free-tier server; AI meal-photo recognition (paid, only with your approval).
 

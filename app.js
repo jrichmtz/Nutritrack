@@ -4,7 +4,7 @@
   Local-first PWA: all personal data lives in this device's IndexedDB.
   Only barcode numbers / search words leave the device (sent to Open Food Facts).
 */
-const APP_VERSION = '4.1.0';
+const APP_VERSION = '6.0.0';
 
 // ---------- Constants ----------
 const NUTS = [
@@ -54,6 +54,12 @@ const FEATURES = {
     'Trend weight and estimated calorie burn (energy balance)',
     'Daily and weekly recaps with tips, plus “Ask Claude” sharing',
     'Type-a-food search: your foods, USDA common & restaurant foods, brands, quick calories',
+    'Estimated Wegovy level chart and side-effect trends',
+    'Progress photos with before/after compare',
+    'Daily habit tracker (no streak pressure)',
+    'Recommended targets from your stats and a weekly calorie check-in',
+    'Health profile (conditions + medications) with personalized guidance',
+    'Blood pressure log with categories and chart; lab results with trends',
     'Limits for sodium, saturated fat and added sugar',
   ],
   planned: [
@@ -219,7 +225,7 @@ const DB = (() => {
   function open() {
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open('nutritrack', 3);
+      const r = indexedDB.open('nutritrack', 5);
       r.onupgradeneeded = e => {
         const d = r.result;
         if (e.oldVersion < 1) {
@@ -236,6 +242,8 @@ const DB = (() => {
           d.createObjectStore('meds', { keyPath: 'id' });
           d.createObjectStore('health', { keyPath: 'date' });
         }
+        if (e.oldVersion < 4) d.createObjectStore('pphotos', { keyPath: 'id' });
+        if (e.oldVersion < 5) { d.createObjectStore('bp', { keyPath: 'id' }); d.createObjectStore('labs', { keyPath: 'id' }); }
       };
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
@@ -255,7 +263,7 @@ const DB = (() => {
     });
   }
   return {
-    STORES: ['foods', 'entries', 'days', 'kv', 'pending', 'photos', 'weights', 'measurements', 'meds', 'health'],
+    STORES: ['foods', 'entries', 'days', 'kv', 'pending', 'photos', 'weights', 'measurements', 'meds', 'health', 'pphotos', 'bp', 'labs'],
     get: (s, k) => tx(s, 'readonly', st => st.get(k)),
     put: (s, v) => tx(s, 'readwrite', st => st.put(v)),
     del: (s, k) => tx(s, 'readwrite', st => st.delete(k)),
@@ -271,8 +279,8 @@ async function loadSettings() { state.settings = Object.assign({}, DEFAULT_SETTI
 async function entriesFor(date) { return (await DB.byIndex('entries', 'date', date)).sort((a, b) => a.createdAt - b.createdAt); }
 async function getDay(date) { return (await DB.get('days', date)) || { date, waterOz: 0 }; }
 function snapshot(f) {
-  const { id, name, brand, barcode, servingLabel, servingGrams, baseUnit, servingsPerContainer, spcEstimated, per100, perServing, imageUrl, incomplete, source, packageSize } = f;
-  return { id, name, brand, barcode, servingLabel, servingGrams, baseUnit, servingsPerContainer, spcEstimated, per100, perServing, imageUrl, incomplete, source, packageSize };
+  const { id, name, brand, barcode, servingLabel, servingGrams, baseUnit, servingsPerContainer, spcEstimated, per100, perServing, imageUrl, incomplete, source, packageSize, portions } = f;
+  return { id, name, brand, barcode, servingLabel, servingGrams, baseUnit, servingsPerContainer, spcEstimated, per100, perServing, imageUrl, incomplete, source, packageSize, portions };
 }
 
 // ---------- Icons ----------
@@ -330,8 +338,28 @@ function thumb(url, cls = 'thumb') {
   return url ? `<img class="${cls}" src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="${cls}"></div>`;
 }
 function amountLabel(e) {
+  if (e.portion) {
+    const c = fmt(e.portion.count, 2), L = e.portion.label;
+    return /^(oz|fl oz|cup|tbsp|tsp)$/.test(L) ? `${c} ${L}` : /^1\s/.test(L) ? `${c} × ${L.replace(/^1\s+/, '')}` : `${c} × ${L}`;
+  }
   const a = Number(e.amount);
   return e.unit === 'serving' ? `${fmt(a, 2)} serving${a === 1 ? '' : 's'}` : `${fmt(a, 1)} ${e.baseUnit || 'g'}`;
+}
+// All the ways an amount can be entered for a food: servings, named portions (1 large egg, 1 cup…), weight and volume units.
+function unitOptions(food) {
+  const bu = food.baseUnit || 'g', canS = canUseServing(food), canG = canUseGrams(food), out = [];
+  if (canS) out.push({ key: 'serving', label: food.servingLabel ? `Serving · ${food.servingLabel}` : 'Servings', base: 'serving', per: 1, step: 0.5 });
+  if (canG) {
+    for (const p of food.portions || []) if (p.g > 0 && !(food.servingGrams && Math.abs(p.g - food.servingGrams) < 0.01 && /serving/i.test(p.label))) out.push({ key: 'p:' + p.label, label: p.label, base: 'g', per: p.g, step: 0.5, portion: true });
+    if (bu === 'ml') {
+      out.push({ key: 'cup', label: 'cup', base: 'g', per: 240, step: 0.25 }, { key: 'floz', label: 'fl oz', base: 'g', per: 29.57, step: 1 }, { key: 'tbsp', label: 'tbsp', base: 'g', per: 15, step: 1 });
+      out.push({ key: 'g', label: 'ml', base: 'g', per: 1, step: 10 });
+    } else {
+      out.push({ key: 'oz', label: 'oz', base: 'g', per: 28.35, step: 1 }, { key: 'g', label: 'grams', base: 'g', per: 1, step: 10 });
+    }
+  }
+  if (!out.length) out.push({ key: 'serving', label: 'Servings', base: 'serving', per: 1, step: 0.5 });
+  return out;
 }
 
 // ---------- Navigation ----------
@@ -423,11 +451,15 @@ async function renderHome() {
     <button class="action" data-act="recipe"><span class="ai" style="--c:#8e5cf7">${ICON.recipe}</span>Recipes</button>
   </section>
 
+  ${!s.targetsSetAt ? `<section class="card recap"><h2>Set targets for you</h2><p class="small muted" style="margin-top:0">Your goals are still generic defaults. Get calories and macros based on your height, weight, age and activity.</p>
+    <button class="btn primary block" data-act="targets">Recommend my targets</button></section>` : ''}
   ${quick.length ? `<section class="card"><div class="spread"><h2 style="margin:0">Quick add</h2><span class="tiny muted">tap · then Add</span></div><div class="chips" style="margin-top:10px">${quick.map(q => `<button class="chip" data-act="quick" data-id="${q.f.id}">${q.star ? '★ ' : ''}${esc(q.f.name)}</button>`).join('')}</div></section>` : ''}
 
   <section class="card recap"><div class="spread"><h2 style="margin:0">${isToday ? 'Today’s recap' : 'Day recap'}</h2><span class="pill ok">${entries.length} item${entries.length === 1 ? '' : 's'}</span></div>
     <ul class="tips">${tips.map(x => `<li class="tip ${x.kind}"><span class="ti">${x.icon}</span><span>${x.text}</span></li>`).join('')}</ul>
     <button class="btn secondary block" data-act="ask-day">✨ Ask Claude about ${isToday ? 'today' : 'this day'}</button></section>
+
+  ${await habitCard(date)}
 
   <section class="card"><h2>Limits</h2>
     ${limit('sodium', 'Sodium', 'mg', s.sodiumLimit)}${limit('satfat', 'Saturated fat', 'g', s.satfatLimit)}${limit('addedSugar', 'Added sugar', 'g', s.addedSugarLimit)}
@@ -442,6 +474,8 @@ async function renderHome() {
   view().onclick = async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.day) { state.homeDate = b.dataset.day; render(); return; }
+    if (b.dataset.habit) { toggleHabit(date, b.dataset.habit); return; }
+    if (b.dataset.act === 'habits-edit') { openHabitsEdit(); return; }
     const a = b.dataset.act;
     if (a === 'settings') openSettings();
     else if (a === 'scan' || a === 'tab-scan') go('scan');
@@ -452,6 +486,7 @@ async function renderHome() {
     else if (a === 'water') addWater(date, Number(b.dataset.v));
     else if (a === 'quick') { const f = await DB.get('foods', b.dataset.id); if (f) openLogSheet(f, { date }); }
     else if (a === 'ask-day') shareText(await buildDayRecap(date), 'Day recap');
+    else if (a === 'targets') openTargets();
   };
 }
 function greeting() { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; }
@@ -489,7 +524,7 @@ async function buildInsights(date) {
     const picks = await fiberPicks();
     out.push({ kind: 'act', icon: '🥦', text: `Fiber ${fmt(t.fiber)} g of ${fmt(s.fiber)} g. Fiber and water can help with constipation.${picks.length ? ' Higher-fiber foods you have: ' + picks.join(', ') + '.' : ''}` });
   }
-  if (s.sodiumLimit && t.sodium > s.sodiumLimit) out.push({ kind: 'warn', icon: '🧂', text: `Sodium ${fmt(t.sodium)} mg is over your ${fmt(s.sodiumLimit)} mg limit. Expect a temporary water-weight bump on the scale tomorrow.` });
+  if (s.sodiumLimit && t.sodium > s.sodiumLimit) out.push({ kind: 'warn', icon: '🧂', text: `Sodium ${fmt(t.sodium)} mg is over your ${fmt(s.sodiumLimit)} mg limit${hasCond('htn') ? ', which matters for your blood pressure' : ''}. Expect a temporary water-weight bump on the scale tomorrow.` });
   if (s.waterGoal && (late || h >= 15) && day.waterOz < s.waterGoal * 0.5) out.push({ kind: 'act', icon: '💧', text: `Water ${fmt(day.waterOz)} of ${fmt(s.waterGoal)} oz — hydration matters more on a GLP-1 medication.` });
   const rem = s.kcal - t.kcal;
   if (late && rem < -150) out.push({ kind: 'info', icon: '📊', text: `${fmt(-rem)} kcal over goal. One day doesn’t move the trend — the weekly average is what counts.` });
@@ -499,6 +534,7 @@ async function buildInsights(date) {
     const ws = await DB.all('weights'); const lastW = ws.map(w => w.date).sort().pop();
     if (!lastW || daysBetween(lastW, today) >= 7) out.push({ kind: 'act', icon: '⚖️', text: `No weigh-in ${lastW ? 'for ' + daysBetween(lastW, today) + ' days' : 'yet'}. A few weigh-ins a week make your trend reliable.` });
   }
+  if (isToday && hasCond('htn')) { const bpl = (await DB.all('bp')).map(r => r.date).sort().pop(); if (!bpl || daysBetween(bpl, today) >= 7) out.push({ kind: 'act', icon: '🩺', text: 'No blood pressure reading this week — log one in the Health tab.' }); }
   if (!out.some(x => x.kind === 'act' || x.kind === 'warn')) out.push({ kind: 'good', icon: '✅', text: 'Solid day so far — nothing needs attention.' });
   return out;
 }
@@ -513,6 +549,7 @@ async function buildDayRecap(date) {
   for (const m of meds) lines.push(m.type === 'dose' ? `Dose: ${m.med} ${m.dose}` : `Check-in: appetite ${APPETITE[m.appetite]}, nausea ${SEVERITY[m.nausea]}, constipation ${SEVERITY[m.constipation]}${m.other ? ', ' + m.other : ''}`);
   const w = (await DB.all('weights')).filter(x => x.date === date).pop(); if (w) lines.push(`Weight: ${fmt(w.lb, 1)} lb`);
   const h = await DB.get('health', date); if (h) lines.push(`Activity: ${fmt(h.steps)} steps, sleep ${h.sleepHrs ?? '—'} h, resting HR ${h.restingHR ?? '—'}`);
+  const hc = healthContextLines(); if (hc.length) lines.push('', 'Health context:', ...hc);
   lines.push('', 'Please give me a short recap of this day and 2–3 practical food suggestions for tomorrow, based on what I actually eat. Don’t suggest medication changes.');
   return lines.join('\n');
 }
@@ -528,6 +565,8 @@ async function buildWeekRecap() {
   const ex = await expenditureEstimate(); if (ex.ok) lines.push(`Estimated expenditure: about ${fmt(ex.tdee)} kcal/day (from ${ex.loggedDays} logged days and weight trend).`);
   const meds = (await DB.all('meds')).filter(m => m.date > addDays(today, -7)).sort((a, b) => a.date.localeCompare(b.date));
   for (const m of meds) lines.push(m.type === 'dose' ? `Dose ${m.date}: ${m.med} ${m.dose}` : `Check-in ${m.date}: appetite ${APPETITE[m.appetite]}, nausea ${SEVERITY[m.nausea]}, constipation ${SEVERITY[m.constipation]}${m.other ? ', ' + m.other : ''}`);
+  const bpw = (await DB.all('bp')).filter(r => r.date > addDays(today, -7)); if (bpw.length) lines.push(`Blood pressure this week: ${bpw.map(r => `${r.sys}/${r.dia}${r.dizzy ? ' (dizzy)' : ''}`).join(', ')}`);
+  const hc = healthContextLines(); if (hc.length) lines.push('', 'Health context:', ...hc);
   lines.push('', 'Please give me a weekly recap: what went well, patterns you notice, and 3 practical changes for next week based on the foods I actually eat. Flag anything worth discussing with my doctor, but don’t suggest medication changes.');
   return lines.join('\n');
 }
@@ -818,8 +857,15 @@ async function openLogSheet(foodIn, opts = {}) {
   const food = entry ? entry.food : (libFood || foodIn);
   const bu = food.baseUnit || 'g';
   const canS = canUseServing(food), canG = canUseGrams(food);
-  let unit = entry ? entry.unit : (canS ? 'serving' : canG ? 'g' : 'serving');
-  let amount = entry ? entry.amount : (unit === 'serving' ? 1 : (food.servingGrams || 100));
+  let units = unitOptions(food);
+  let u, amount;
+  if (entry) {
+    u = (entry.portion && units.find(x => x.label === entry.portion.label)) || units.find(x => x.key === (entry.unit === 'serving' ? 'serving' : 'g')) || units[0];
+    amount = entry.portion && u.label === entry.portion.label ? entry.portion.count : entry.amount / (u.base === 'serving' ? 1 : u.per);
+  } else {
+    u = units.find(x => x.key === 'serving') || units.find(x => x.portion) || units.find(x => x.key === 'g') || units[0];
+    amount = u.key === 'g' ? (food.servingGrams || 100) : 1;
+  }
   let meal = entry?.meal || opts.meal || state.pendingMeal || defaultMeal();
   let date = entry?.date || opts.date || (state.tab === 'diary' ? state.date : dateStr());
   let fav = !!libFood?.favorite;
@@ -843,7 +889,7 @@ async function openLogSheet(foodIn, opts = {}) {
     </div>
     ${!canS && !canG ? `<div class="warnbox">This record has no nutrition numbers. Enter them from the label so this food counts toward your totals.</div>` : ''}
     <label class="f">Amount eaten</label>
-    <div class="seg" id="unit-seg">${canS ? '<button data-unit="serving">Servings</button>' : ''}${canG ? `<button data-unit="g">${bu === 'ml' ? 'Milliliters' : 'Grams'}</button>` : ''}</div>
+    <div class="unit-chips" id="unit-seg"></div>
     <div class="stepper"><button data-act="minus" aria-label="Less">−</button><input class="in" id="amt" type="number" inputmode="decimal" step="any" min="0"><button data-act="plus" aria-label="More">+</button></div>
     <div class="quick" id="quick"></div>
     <label class="f">Meal</label>
@@ -860,34 +906,69 @@ async function openLogSheet(foodIn, opts = {}) {
 
   const amt = $('#amt', el);
   $('#logdate', el).value = date;
+  const base = () => ({ unit: u.base, amount: u.base === 'serving' ? amount : amount * u.per });
+  function drawUnits() {
+    $('#unit-seg', el).innerHTML = units.map(x => `<button data-unit="${esc(x.key)}" class="${x.key === u.key ? 'on' : ''}">${esc(x.label)}${x.portion || x.key === 'serving' ? '' : ''}</button>`).join('') + (canG ? '<button data-act="add-unit" class="add">+ unit</button>' : '');
+  }
   function update() {
     amount = num(amt.value) ?? 0;
-    $$('#unit-seg button', el).forEach(b => b.classList.toggle('on', b.dataset.unit === unit));
+    $$('#unit-seg button[data-unit]', el).forEach(b => b.classList.toggle('on', b.dataset.unit === u.key));
     $$('#meal-seg button', el).forEach(b => b.classList.toggle('on', b.dataset.meal === meal));
-    const n = calcNutrients(food, amount, unit);
+    const bs = base(), n = calcNutrients(food, bs.amount, bs.unit);
     $('#nut', el).innerHTML = NUTS.map(([k, l, u, d]) => `<tr class="${k === 'kcal' ? 'main' : ''}"><td>${l}</td><td>${n[k] == null ? '<span class="na">—</span>' : fmt(n[k], d) + (k === 'kcal' ? '' : ' ' + u)}</td></tr>`).join('');
-    const qs = unit === 'serving' ? [0.5, 1, 1.5, 2] : (food.servingGrams ? [food.servingGrams / 2, food.servingGrams, food.servingGrams * 2, 100].map(x => Math.round(x)) : [50, 100, 150, 200]);
-    $('#quick', el).innerHTML = [...new Set(qs)].map(q => `<button data-q="${q}">${unit === 'serving' ? (q === 0.5 ? '½' : q === 1.5 ? '1½' : q) : q + ' ' + bu}</button>`).join('');
+    const frac = q => q === 0.5 ? '½' : q === 1.5 ? '1½' : q === 0.25 ? '¼' : String(q);
+    let qs, lab;
+    if (u.key === 'g') { qs = food.servingGrams ? [food.servingGrams / 2, food.servingGrams, food.servingGrams * 2, 100].map(x => Math.round(x)) : [50, 100, 150, 200]; lab = q => q + ' ' + (bu === 'ml' ? 'ml' : 'g'); }
+    else if (u.key === 'oz' || u.key === 'floz') { qs = [2, 4, 6, 8]; lab = q => q + ' ' + u.label; }
+    else if (u.key === 'cup') { qs = [0.25, 0.5, 1, 1.5]; lab = frac; }
+    else { qs = u.portion ? [1, 2, 3, 4] : [0.5, 1, 1.5, 2]; lab = frac; }
+    $('#quick', el).innerHTML = [...new Set(qs)].map(q => `<button data-q="${q}">${lab(q)}</button>`).join('');
     $('#save-btn', el).textContent = entry ? 'Update entry' : `Add to ${MEAL_LABEL[meal]}`;
     $('#save-btn', el).disabled = !(amount > 0);
   }
   amt.value = String(Math.round(amount * 100) / 100);
   amt.oninput = update;
+  drawUnits();
   $('#logdate', el).onchange = e => { if (e.target.value) date = e.target.value; };
   update();
 
   el.onclick = async e => {
     const b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.unit && b.dataset.unit !== unit) {
-      // convert amount between units when we know the serving weight
-      if (food.servingGrams) amount = b.dataset.unit === 'g' ? Math.round(amount * food.servingGrams) : Math.round(amount / food.servingGrams * 100) / 100;
-      else amount = b.dataset.unit === 'g' ? 100 : 1;
-      unit = b.dataset.unit; amt.value = String(amount); update(); return;
+    if (b.dataset.unit && b.dataset.unit !== u.key) {
+      // keep the same quantity of food when switching units, when the weights are known
+      const nu = units.find(x => x.key === b.dataset.unit); if (!nu) return;
+      const grams = u.base === 'serving' ? (food.servingGrams ? amount * food.servingGrams : null) : amount * u.per;
+      let na;
+      if (grams != null && (nu.base === 'g' || food.servingGrams)) na = nu.base === 'serving' ? grams / food.servingGrams : grams / nu.per;
+      else na = nu.key === 'g' ? (food.servingGrams || 100) : 1;
+      na = nu.key === 'g' ? Math.round(na) : Math.round(na * 4) / 4 || (nu.key === 'g' ? 1 : 0.25);
+      u = nu; amount = na; amt.value = String(na); update(); return;
+    }
+    if (b.dataset.act === 'add-unit') {
+      const sh = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Add a unit</div><span style="width:50px"></span></div>
+        <p class="small muted">Save a unit you use for this food, like “1 egg”, “1 slice” or “1 bowl”. Weigh it once or use the package info.</p>
+        <label class="f">Unit name</label><input class="in" id="nu-l" placeholder="e.g. 1 egg">
+        <label class="f">Weight of one (${bu === 'ml' ? 'ml' : 'grams'})</label><input class="in" id="nu-g" type="number" inputmode="decimal" step="any" placeholder="e.g. 50">
+        <div class="stack"><button class="btn primary big" data-act="ok">Save unit</button></div>`);
+      sh.onclick = async ev => {
+        const bb = ev.target.closest('button'); if (!bb) return;
+        if (bb.dataset.act === 'close') closeSheet();
+        if (bb.dataset.act === 'ok') {
+          let label = $('#nu-l', sh).value.trim(); const g = num($('#nu-g', sh).value);
+          if (!label || !(g > 0)) { toast('Enter a name and a weight'); return; }
+          if (!/^\d/.test(label)) label = '1 ' + label;
+          food.portions = [...(food.portions || []).filter(p => p.label !== label), { label, g }];
+          if (libFood) { libFood.portions = food.portions; await DB.put('foods', libFood); }
+          closeSheet();
+          units = unitOptions(food); u = units.find(x => x.label === label) || u; amount = 1; amt.value = '1'; drawUnits(); update();
+        }
+      };
+      return;
     }
     if (b.dataset.meal) { meal = b.dataset.meal; update(); return; }
     if (b.dataset.q) { amt.value = b.dataset.q; update(); return; }
     const a = b.dataset.act;
-    const step = unit === 'serving' ? 0.5 : (food.servingGrams && food.servingGrams < 40 ? 5 : 10);
+    const step = u.key === 'g' ? (food.servingGrams && food.servingGrams < 40 ? 5 : 10) : u.step;
     if (a === 'close') closeSheet();
     else if (a === 'minus') { amt.value = String(Math.max(0, Math.round(((num(amt.value) || 0) - step) * 100) / 100)); update(); }
     else if (a === 'plus') { amt.value = String(Math.round(((num(amt.value) || 0) + step) * 100) / 100); update(); }
@@ -914,9 +995,10 @@ async function openLogSheet(foodIn, opts = {}) {
       closeSheet(); toast('Entry deleted'); render();
     } else if (a === 'save') {
       if (!(amount > 0)) return;
-      const nutrients = calcNutrients(food, amount, unit);
+      const bs = base(), nutrients = calcNutrients(food, bs.amount, bs.unit);
       const rec = entry ? { ...entry } : { id: uid(), createdAt: Date.now() };
-      Object.assign(rec, { date, meal, foodId: food.id, food: snapshot(food), amount, unit, baseUnit: bu, nutrients, updatedAt: Date.now() });
+      const portion = u.key === 'serving' || u.key === 'g' ? null : { label: u.label, g: u.per, count: amount };
+      Object.assign(rec, { date, meal, foodId: food.id, food: snapshot(food), amount: bs.amount, unit: bs.unit, portion, baseUnit: bu, nutrients, updatedAt: Date.now() });
       await DB.put('entries', rec);
       if (libFood && !entry) { libFood.useCount = (libFood.useCount || 0) + 1; libFood.lastUsed = Date.now(); await DB.put('foods', libFood); }
       state.pendingMeal = null;
@@ -1103,8 +1185,9 @@ function mapUSDA(x) {
     const m = meas.sort((a, b) => (a.rank || 99) - (b.rank || 99))[0];
     servingGrams = m.gramWeight; servingLabel = `${m.disseminationText} (${fmt(m.gramWeight)} g)`;
   }
+  const portions = meas.map(m => ({ label: m.disseminationText, g: m.gramWeight }));
   const f = {
-    id: uid(), fdcId: x.fdcId, barcode: x.gtinUpc || null, name: niceName(x.description), brand: niceName(x.brandName || x.brandOwner || ''),
+    id: uid(), fdcId: x.fdcId, portions, barcode: x.gtinUpc || null, name: niceName(x.description), brand: niceName(x.brandName || x.brandOwner || ''),
     servingLabel, servingGrams, baseUnit, servingsPerContainer: null, per100: hasAny(per100) ? per100 : null, perServing: null,
     imageUrl: '', source: /restaurant|fast food/i.test(x.foodCategory || '') ? 'USDA · restaurant' : x.dataType === 'Branded' ? 'USDA (brand)' : 'USDA', favorite: false, useCount: 0, lastUsed: 0, createdAt: Date.now(),
   };
@@ -1594,7 +1677,11 @@ async function renderProgress() {
   <section class="card"><h2>Energy balance</h2>
     ${ex.ok ? `<div class="totals" style="grid-template-columns:repeat(3,1fr)"><div><div class="big">${fmt(ex.tdee, 0)}</div><div class="lbl">est. burn / day</div></div>
       <div><div class="big">${fmt(ex.intake)}</div><div class="lbl">avg eaten</div></div><div><div class="big">${ex.rate <= 0 ? '−' : '+'}${fmt(Math.abs(ex.rate), 1)}</div><div class="lbl">lb / week</div></div></div>
-      <p class="tiny muted" style="margin:10px 0 0">Estimated from your last 28 days of logged food and your trend weight (like MacroFactor). It’s only as accurate as your logging — skipped snacks make it read low.</p>`
+      <p class="tiny muted" style="margin:10px 0 0">Estimated from your last 28 days of logged food and your trend weight (like MacroFactor). It’s only as accurate as your logging — skipped snacks make it read low.</p>
+      ${(() => { const c = checkinSuggestion(ex, s); if (!c) return '';
+        return c.same ? `<div class="tip good" style="margin-top:10px"><span class="ti">✅</span><span>Weekly check-in: your ${fmt(s.kcal)} kcal target fits your ${c.pace} lb/week pace. No change needed.</span></div>`
+          : `<div class="tip act" style="margin-top:10px"><span class="ti">🎯</span><span>Weekly check-in: to lose about ${c.pace} lb/week, your measured burn suggests ~${fmt(c.target)} kcal. Suggested step: <b>${fmt(c.kcal)} kcal</b> (carbs ${c.carbs} g, fat ${c.fat} g; protein stays ${s.protein} g).</span></div>
+            <button class="btn primary block" style="margin-top:8px" data-act="checkin" data-k="${c.kcal}" data-c="${c.carbs}" data-f="${c.fat}">Apply new target</button>`; })()}`
       : `<p class="small muted" style="margin:0">Once you’ve logged food on ${ex.needDays} of the last 28 days and weighed in at least 4 times, the app estimates how many calories you actually burn — the best way to see if a plateau is real. So far: ${ex.loggedDays} logged days, ${ex.weighIns} weigh-ins.</p>`}
   </section>
   <section class="card recap"><h2>Weekly recap</h2><p class="small muted" style="margin-top:0">A summary of your last 7 days — food, weight trend, doses and activity — ready to paste into your chat with Claude for patterns and suggestions.</p>
@@ -1604,6 +1691,10 @@ async function renderProgress() {
       return `<div class="kv"><span>${m.l}</span><span>${fmt(m.last.v, 2)} in <span class="muted small">(${m.first.date === m.last.date ? 'measured ' + fd : (m.change <= 0 ? '−' : '+') + fmt(Math.abs(m.change), 2) + ' since ' + fd})</span></span></div>`; }).join('')
       : '<p class="small muted">Waist, chest, neck, hips and thigh, in inches.</p>'}
   </section>
+  ${await (async () => { const ph = (await DB.all('pphotos')).sort((a, b) => b.date.localeCompare(a.date));
+    return `<section class="card"><div class="spread"><h2 style="margin:0">Progress photos</h2><button class="btn secondary" data-act="photo-add">+ Add</button></div>
+      ${ph.length ? `<div class="photo-strip">${ph.slice(0, 8).map(p => `<img src="${p.dataUrl}" alt="">`).join('')}</div><button class="btn block" style="margin-top:10px" data-act="photo-compare">Compare before &amp; after</button>`
+        : '<p class="small muted">Photos often show progress the scale doesn’t — especially during a plateau. They stay private on this phone.</p>'}</section>`; })()}
   <section class="card"><div class="spread"><h2 style="margin:0">Calories, last 7 days</h2><span class="pill">goal ${fmt(s.kcal)}</span></div>
     <div class="week"><div class="goal-line" style="bottom:${(s.kcal / max * 100).toFixed(1)}%"></div>
     ${last7.map(x => `<div class="col"><div class="b ${x.n ? '' : 'empty'}" style="height:${x.n ? Math.max(2, x.kcal / max * 100) : 2}%"></div></div>`).join('')}</div>
@@ -1625,6 +1716,9 @@ async function renderProgress() {
     else if (a === 'measure') openMeasureSheet();
     else if (a === 'report') openReportSheet();
     else if (a === 'ask-week') buildWeekRecap().then(t => shareText(t, 'Weekly recap'));
+    else if (a === 'checkin') applyCheckin({ kcal: Number(b.dataset.k), carbs: Number(b.dataset.c), fat: Number(b.dataset.f) });
+    else if (a === 'photo-add') addProgressPhoto();
+    else if (a === 'photo-compare') openPhotoCompare();
   };
 }
 
@@ -1656,7 +1750,6 @@ function openDoseSheet(rec) {
     <label class="f">Medication</label><input class="in" id="ds-m" value="${esc(r.med)}">
     <label class="f">Dose taken</label><input class="in" id="ds-d" value="${esc(r.dose)}" placeholder="e.g. 0.5 mg">
     <label class="f">Date</label><input class="in" id="ds-dt" type="date" value="${r.date}">
-    <label class="f">Injection site</label><select class="in" id="ds-s">${['', 'Abdomen', 'Thigh', 'Upper arm', 'Other'].map(v => `<option${r.site === v ? ' selected' : ''}>${v}</option>`).join('')}</select>
     <label class="f">Notes</label><input class="in" id="ds-n" value="${esc(r.notes)}">
     <div class="stack"><button class="btn primary big" data-act="ok">Save</button>${rec ? '<button class="btn danger" data-act="del">Delete</button>' : ''}</div>`);
   el.onclick = async e => {
@@ -1664,7 +1757,7 @@ function openDoseSheet(rec) {
     if (b.dataset.act === 'close') closeSheet();
     if (b.dataset.act === 'del') { if (confirm('Delete this dose record?')) { await DB.del('meds', r.id); closeSheet(); render(); } }
     if (b.dataset.act === 'ok') {
-      Object.assign(r, { med: $('#ds-m', el).value.trim(), dose: $('#ds-d', el).value.trim(), date: $('#ds-dt', el).value || dateStr(), site: $('#ds-s', el).value, notes: $('#ds-n', el).value.trim() });
+      Object.assign(r, { med: $('#ds-m', el).value.trim(), dose: $('#ds-d', el).value.trim(), date: $('#ds-dt', el).value || dateStr(), notes: $('#ds-n', el).value.trim() });
       if (!r.med) { toast('Enter the medication name'); return; }
       await DB.put('meds', r); closeSheet(); toast('Dose logged'); render();
     }
@@ -1845,6 +1938,361 @@ function openHealthImport() {
   };
 }
 
+// ---------- v5: Wegovy level estimate, side-effect trends, injection sites, progress photos, habits ----------
+// Rough illustration only: semaglutide's half-life is about one week; absorption peaks ~1–3 days after a dose.
+const SEMA = { ke: Math.LN2 / 165, ka: 0.06 };
+function doseMg(s) { const m = String(s || '').match(/(\d+(?:\.\d+)?)\s*mg/i) || String(s || '').match(/(\d+(?:\.\d+)?)/); return m ? num(m[1]) : null; }
+function medLevelSeries(doses, fromDate, toDate) {
+  const pts = [], ds = doses.map(d => ({ t: parseD(d.date).getTime(), mg: doseMg(d.dose) })).filter(d => d.mg);
+  const { ke, ka } = SEMA, norm = 1 / (Math.exp(-ke * Math.log(ka / ke) / (ka - ke)) - Math.exp(-ka * Math.log(ka / ke) / (ka - ke)));
+  for (let d = fromDate; d <= toDate; d = addDays(d, 1)) {
+    const t = parseD(d).getTime() + 12 * 36e5; let v = 0;
+    for (const x of ds) { const h = (t - x.t) / 36e5; if (h > 0) v += x.mg * norm * (Math.exp(-ke * h) - Math.exp(-ka * h)); }
+    pts.push({ date: d, v: Math.round(v * 100) / 100 });
+  }
+  return pts;
+}
+// ---- Progress photos ----
+async function addProgressPhoto() {
+  const file = await pickPhoto(); if (!file) return;
+  let dataUrl; try { dataUrl = await downscale(file, 1100, 0.82); } catch (e) { toast(e.message); return; }
+  const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Progress photo</div><span style="width:50px"></span></div>
+    <img src="${dataUrl}" alt="" style="width:100%; max-height:46vh; object-fit:contain; border-radius:16px; background:#000">
+    <label class="f">Pose</label><div class="seg" id="pp-pose">${['Front', 'Side', 'Back'].map((p, i) => `<button data-p="${p}" class="${i === 0 ? 'on' : ''}">${p}</button>`).join('')}</div>
+    <label class="f">Date</label><input class="in" type="date" id="pp-d" value="${dateStr()}">
+    <p class="tiny muted">Same spot, lighting and time of day each time makes comparisons fair. Photos stay on this phone (and in your encrypted backups).</p>
+    <div class="stack"><button class="btn primary big" data-act="ok">Save photo</button></div>`);
+  let pose = 'Front';
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.p) { pose = b.dataset.p; $$('#pp-pose button', el).forEach(x => x.classList.toggle('on', x === b)); return; }
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'ok') { await DB.put('pphotos', { id: uid(), date: $('#pp-d', el).value || dateStr(), pose, dataUrl, createdAt: Date.now() }); closeSheet(); toast('Photo saved'); render(); }
+  };
+}
+async function openPhotoCompare() {
+  const all = (await DB.all('pphotos')).sort((a, b) => a.date.localeCompare(b.date));
+  const poses = [...new Set(all.map(p => p.pose))];
+  let pose = poses.includes('Front') ? 'Front' : poses[0];
+  const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Close</button><div class="sheet-title">Compare photos</div><span style="width:50px"></span></div>
+    <div class="seg" id="pc-pose">${poses.map(p => `<button data-p="${p}">${p}</button>`).join('')}</div>
+    <div class="grid2" style="margin-top:12px"><div><label class="f">Before</label><select class="in" id="pc-a"></select></div><div><label class="f">After</label><select class="in" id="pc-b"></select></div></div>
+    <div class="grid2" style="margin-top:10px" id="pc-imgs"></div><div id="pc-w" class="small muted" style="text-align:center; margin-top:8px"></div>
+    <h3>All photos</h3><div class="photo-grid" id="pc-all"></div>`);
+  const weights = lastPerDay(await DB.all('weights'), 'lb');
+  const wNear = d => { const w = weights.slice().sort((a, b) => Math.abs(daysBetween(a.date, d)) - Math.abs(daysBetween(b.date, d)))[0]; return w && Math.abs(daysBetween(w.date, d)) <= 7 ? w.v : null; };
+  const draw = () => {
+    const list = all.filter(p => p.pose === pose);
+    $$('#pc-pose button', el).forEach(b => b.classList.toggle('on', b.dataset.p === pose));
+    const opt = sel => list.map(p => `<option value="${p.id}"${p.id === sel ? ' selected' : ''}>${esc(parseD(p.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }))}</option>`).join('');
+    const a = $('#pc-a', el), b = $('#pc-b', el);
+    const aId = list.some(p => p.id === a.value) ? a.value : list[0]?.id, bId = list.some(p => p.id === b.value) ? b.value : list[list.length - 1]?.id;
+    a.innerHTML = opt(aId); b.innerHTML = opt(bId);
+    const pa = list.find(p => p.id === aId), pb = list.find(p => p.id === bId);
+    $('#pc-imgs', el).innerHTML = [pa, pb].map(p => p ? `<img src="${p.dataUrl}" alt="" style="width:100%; aspect-ratio:3/4; object-fit:cover; border-radius:14px">` : '<div></div>').join('');
+    const wa = pa && wNear(pa.date), wb = pb && wNear(pb.date);
+    $('#pc-w', el).textContent = wa != null && wb != null ? `${fmt(wa, 1)} lb → ${fmt(wb, 1)} lb (${wb - wa <= 0 ? '−' : '+'}${fmt(Math.abs(wb - wa), 1)} lb)` : '';
+    $('#pc-all', el).innerHTML = all.slice().reverse().map(p => `<div class="ph-cell"><img src="${p.dataUrl}" alt=""><span>${esc(parseD(p.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))} · ${esc(p.pose)}</span><button class="link" style="color:var(--red)" data-del="${p.id}">Delete</button></div>`).join('');
+  };
+  draw();
+  $('#pc-a', el).onchange = draw; $('#pc-b', el).onchange = draw;
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.p) { pose = b.dataset.p; $('#pc-a', el).value = ''; $('#pc-b', el).value = ''; draw(); return; }
+    if (b.dataset.del) { if (confirm('Delete this photo?')) { await DB.del('pphotos', b.dataset.del); const i = all.findIndex(p => p.id === b.dataset.del); all.splice(i, 1); if (!all.length) { closeSheet(); render(); } else draw(); } return; }
+    if (b.dataset.act === 'close') { closeSheet(); render(); }
+  };
+}
+
+// ---- Habits ----
+const DEFAULT_HABITS = [{ id: 'h-protein', name: 'Protein at every meal' }, { id: 'h-walk', name: 'Walked 20+ minutes' }, { id: 'h-strength', name: 'Strength workout' }, { id: 'h-cpap', name: 'Used CPAP all night' }, { id: 'h-veg', name: 'Vegetables at 2 meals' }];
+function habitsList() { return state.settings.habits || DEFAULT_HABITS; }
+async function habitCard(date) {
+  const day = await getDay(date), done = day.habits || {}, hs = habitsList();
+  if (!hs.length) return '';
+  const counts = {};
+  for (let i = 0; i < 7; i++) { const d = await getDay(addDays(date, -i)); for (const h of hs) if ((d.habits || {})[h.id]) counts[h.id] = (counts[h.id] || 0) + 1; }
+  return `<section class="card"><div class="spread"><h2 style="margin:0">Habits</h2><button class="link" data-act="habits-edit">Edit</button></div>
+    <div class="habits">${hs.map(h => `<button class="habit ${done[h.id] ? 'on' : ''}" data-habit="${h.id}"><span class="hc">${done[h.id] ? '✓' : ''}</span><span class="hn">${esc(h.name)}</span><span class="hw">${counts[h.id] || 0}/7</span></button>`).join('')}</div>
+    <p class="tiny muted" style="margin:8px 0 0">Tap to check off. The number is how many of the last 7 days — no streaks to break.</p></section>`;
+}
+async function toggleHabit(date, id) {
+  const day = await getDay(date); day.habits = day.habits || {};
+  if (day.habits[id]) delete day.habits[id]; else day.habits[id] = true;
+  await DB.put('days', day); render();
+}
+function openHabitsEdit() {
+  const hs = habitsList().map(h => ({ ...h }));
+  const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Habits</div><button class="link" data-act="save">Save</button></div>
+    <p class="small muted">Small daily actions that support your goals. Keep it to a handful.</p><div class="card"><ul class="list" id="hb-list"></ul></div>
+    <div class="row"><input class="in" id="hb-new" placeholder="New habit, e.g. 8,000 steps" style="flex:1"><button class="btn secondary" data-act="add">Add</button></div>
+    <div class="stack"><button class="btn primary big" data-act="save">Save</button></div>`);
+  const draw = () => { $('#hb-list', el).innerHTML = hs.length ? hs.map((h, i) => `<li class="spread"><span class="item" style="flex:1">${esc(h.name)}</span><button class="link" style="color:var(--red)" data-rm="${i}">Remove</button></li>`).join('') : '<li class="small muted" style="padding:8px 0">No habits.</li>'; };
+  draw();
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.rm != null) { hs.splice(Number(b.dataset.rm), 1); draw(); return; }
+    if (b.dataset.act === 'add') { const v = $('#hb-new', el).value.trim(); if (v) { hs.push({ id: 'h-' + uid().slice(0, 8), name: v }); $('#hb-new', el).value = ''; draw(); } }
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'save') { state.settings.habits = hs; await DB.put('kv', state.settings); closeSheet(); toast('Habits saved'); render(); }
+  };
+}
+
+
+// ---------- Personal targets & weekly check-in ----------
+const ACTIVITY = [[1.2, 'Mostly sitting (under ~4,000 steps)'], [1.25, 'Light (~4,000–7,000 steps)'], [1.35, 'Moderate (~7,000–10,000 steps or regular workouts)'], [1.5, 'Very active (10,000+ steps and workouts)']];
+const r5 = x => Math.round(x / 5) * 5, r50 = x => Math.round(x / 50) * 50;
+// Mifflin–St Jeor BMR × activity; protein 1.5 g/kg of adjusted body weight when BMI ≥ 30 (1.2–1.6 g/kg is the commonly cited range on GLP-1 medications).
+function recommendTargets({ sex, age, heightIn, weightLb, activity, pace, conditions = [] }) {
+  const kg = weightLb / 2.20462, cm = heightIn * 2.54;
+  const bmr = 10 * kg + 6.25 * cm - 5 * age + (sex === 'female' ? -161 : 5);
+  const tdee = bmr * activity;
+  const floor = sex === 'female' ? 1200 : 1500;
+  const kcal = Math.max(floor, r50(tdee - Math.min(1000, pace * 500)));
+  const ibw = (sex === 'female' ? 45.5 : 50) + 2.3 * Math.max(0, heightIn - 60);
+  const bmi = 703 * weightLb / heightIn ** 2;
+  const refKg = bmi >= 30 ? ibw + 0.4 * (kg - ibw) : kg;
+  const ckd = conditions.includes('ckd');
+  const protein = ckd ? r5(0.8 * refKg) : r5(Math.min(1.5 * refKg, kcal * 0.35 / 4));
+  const fat = r5(kcal * 0.30 / 9);
+  const carbs = r5((kcal - protein * 4 - fat * 9) / 4);
+  const fiber = Math.max(25, r5(14 * kcal / 1000));
+  const sodiumLimit = conditions.includes('htn') || conditions.includes('ckd') ? 2000 : 2300;
+  return { bmr, tdee, kcal, protein, carbs, fat, fiber, sodiumLimit, ckd, floorHit: kcal === floor && tdee - pace * 500 < floor };
+}
+// Weekly check-in: uses the measured burn (food log + trend weight) instead of formulas. Protein stays fixed; carbs and fat absorb the change.
+function checkinSuggestion(ex, s) {
+  if (!ex.ok) return null;
+  const pace = num(s.pace) || 1, floor = s.sex === 'female' ? 1200 : 1500;
+  const target = Math.max(floor, r50(ex.tdee - Math.min(1000, pace * 500)));
+  const delta = target - s.kcal;
+  if (Math.abs(delta) < 100) return { same: true, target, pace };
+  const step = Math.max(-250, Math.min(250, delta)); // change gradually, at most 250 kcal per check-in
+  const kcal = r50(s.kcal + step), fat = r5(kcal * 0.30 / 9), carbs = r5((kcal - s.protein * 4 - fat * 9) / 4);
+  return { same: false, target, pace, kcal, fat, carbs, step };
+}
+async function openTargets() {
+  const s = state.settings;
+  const days = lastPerDay(await DB.all('weights'), 'lb'), tr = trendSeries(days);
+  const w = tr.length ? Math.round(tr[tr.length - 1].v * 10) / 10 : '';
+  const el = openSheet(`
+    <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Recommended targets</div><span style="width:50px"></span></div>
+    <p class="small muted">A science-based starting point from your stats. The weekly check-in on the Progress tab fine-tunes it from your real results.</p>
+    <div class="grid2"><div><label class="f">Sex</label><select class="in" id="tg-sex"><option value="male"${s.sex !== 'female' ? ' selected' : ''}>Male</option><option value="female"${s.sex === 'female' ? ' selected' : ''}>Female</option></select></div>
+      <div><label class="f">Age</label><input class="in" id="tg-age" type="number" inputmode="numeric" value="${s.age ?? ''}"></div>
+      <div><label class="f">Height (in)</label><input class="in" id="tg-h" type="number" inputmode="decimal" value="${s.heightIn ?? ''}"></div>
+      <div><label class="f">Weight (lb)</label><input class="in" id="tg-w" type="number" inputmode="decimal" value="${w}"></div></div>
+    <label class="f">Daily activity</label><select class="in" id="tg-act">${ACTIVITY.map(([v, l]) => `<option value="${v}"${(num(s.activity) || 1.25) === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+    <label class="f">Weight-loss pace</label><div class="seg" id="tg-pace">${[[0.5, '½ lb/wk'], [1, '1 lb/wk'], [1.5, '1½ lb/wk'], [2, '2 lb/wk']].map(([v, l]) => `<button data-p="${v}">${l}</button>`).join('')}</div>
+    <div class="card" style="margin-top:14px" id="tg-out"></div>
+    <div class="stack"><button class="btn primary big" data-act="apply">Use these targets</button></div>
+    <p class="tiny muted">Calories never go below ${'1,500'} (men) or 1,200 (women) here. With your medications and conditions, it’s worth reviewing targets with your doctor or a dietitian.</p>`);
+  let pace = num(s.pace) || 1, res = null;
+  const calc = () => {
+    $$('#tg-pace button', el).forEach(b => b.classList.toggle('on', Number(b.dataset.p) === pace));
+    const inp = { sex: $('#tg-sex', el).value, age: num($('#tg-age', el).value), heightIn: num($('#tg-h', el).value), weightLb: num($('#tg-w', el).value), activity: Number($('#tg-act', el).value), pace, conditions: state.settings.conditions || [] };
+    if (!(inp.age > 12 && inp.heightIn > 48 && inp.weightLb > 70)) { res = null; $('#tg-out', el).innerHTML = '<p class="small muted" style="margin:0">Enter age, height and weight.</p>'; return; }
+    res = { ...recommendTargets(inp), inp };
+    $('#tg-out', el).innerHTML = `<div class="kv" style="border-top:0"><span class="muted">Estimated burn</span><span>~${fmt(r50(res.tdee))} kcal/day</span></div>
+      <div class="kv"><span><b>Calories</b></span><span><b>${fmt(res.kcal)}</b></span></div><div class="kv"><span>Protein</span><span>${res.protein} g</span></div>
+      <div class="kv"><span>Carbs</span><span>${res.carbs} g</span></div><div class="kv"><span>Fat</span><span>${res.fat} g</span></div><div class="kv"><span>Fiber</span><span>${res.fiber} g</span></div><div class="kv"><span>Sodium limit</span><span>${fmt(res.sodiumLimit)} mg</span></div>
+      ${(() => { const notes = []; const c = state.settings.conditions || [];
+        if (c.includes('htn')) notes.push('Sodium limit lowered for high blood pressure.');
+        if (res.ckd) notes.push('Protein kept moderate for kidney disease — confirm with your doctor.');
+        if (c.includes('prediabetes') || c.includes('t2d')) notes.push('Carbs kept moderate for blood-sugar control; choose high-fiber carbs.');
+        if (onMed(MEDRX.glp1)) notes.push('Protein set high to protect muscle on Wegovy.');
+        return notes.length ? `<p class="small muted" style="margin:8px 0 0">Personalized: ${notes.join(' ')}</p>` : (c.length ? '' : '<p class="small muted" style="margin:8px 0 0">Tip: add your conditions in Health → Health profile to personalize these.</p>'); })()}
+      ${res.floorHit ? '<p class="small" style="color:var(--orange)">That pace would go below the safe minimum, so calories are held at the floor.</p>' : ''}`;
+  };
+  $$('input,select', el).forEach(i => { i.oninput = calc; i.onchange = calc; });
+  calc();
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.p) { pace = Number(b.dataset.p); calc(); return; }
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'apply') {
+      if (!res) { toast('Enter age, height and weight'); return; }
+      Object.assign(state.settings, { kcal: res.kcal, protein: res.protein, carbs: res.carbs, fat: res.fat, fiber: res.fiber, sodiumLimit: res.sodiumLimit, sex: res.inp.sex, age: res.inp.age, heightIn: res.inp.heightIn, activity: res.inp.activity, pace, targetsSetAt: Date.now() });
+      await DB.put('kv', state.settings); closeAllSheets(); toast('Targets updated'); render();
+    }
+  };
+}
+async function applyCheckin(sug) {
+  Object.assign(state.settings, { kcal: sug.kcal, carbs: sug.carbs, fat: sug.fat, lastCheckin: Date.now() });
+  await DB.put('kv', state.settings); toast(`Calorie target now ${fmt(sug.kcal)}`); render();
+}
+// ---------- v6: health profile, blood pressure, labs, personalized guidance ----------
+const CONDITIONS = [['htn', 'High blood pressure'], ['osa', 'Sleep apnea (CPAP)'], ['lipids', 'High cholesterol'], ['prediabetes', 'Prediabetes'], ['t2d', 'Type 2 diabetes'], ['ckd', 'Chronic kidney disease'], ['gerd', 'Acid reflux / GERD'], ['anxiety', 'Anxiety or depression']];
+const COND_LABEL = Object.fromEntries(CONDITIONS);
+const hasCond = k => (state.settings.conditions || []).includes(k);
+const activeMeds = () => (state.settings.medList || []).filter(m => m.status !== 'stopped');
+const onMed = re => activeMeds().some(m => re.test(m.name));
+const MEDRX = { arbace: /losartan|valsartan|olmesartan|irbesartan|telmisartan|candesartan|lisinopril|enalapril|ramipril|benazepril|quinapril/i, diuretic: /hydrochlorothiazide|hctz|chlorthalidone|furosemide|bumetanide|torsemide|indapamide/i,
+  beta: /carvedilol|metoprolol|atenolol|propranolol|bisoprolol|nebivolol|labetalol/i, statin: /rosuvastatin|atorvastatin|simvastatin|pravastatin|lovastatin|pitavastatin/i, metformin: /metformin/i,
+  ppi: /pantoprazole|omeprazole|esomeprazole|lansoprazole|rabeprazole|famotidine/i, glp1: /semaglutide|wegovy|ozempic|rybelsus|tirzepatide|zepbound|mounjaro|liraglutide|saxenda/i,
+  bp: /losartan|valsartan|olmesartan|irbesartan|telmisartan|candesartan|lisinopril|enalapril|ramipril|benazepril|hydrochlorothiazide|hctz|chlorthalidone|carvedilol|metoprolol|atenolol|amlodipine|nifedipine|diltiazem|hydralazine|clonidine|spironolactone|doxazosin|labetalol/i };
+function bpMedCount() { return activeMeds().filter(m => MEDRX.bp.test(m.name)).length; }
+// ACC/AHA blood pressure categories
+function bpCategory(sys, dia) {
+  if (sys > 180 || dia > 120) return { k: 'crisis', label: 'Very high', color: '#ff3b30' };
+  if (sys < 90 || dia < 60) return { k: 'low', label: 'Low', color: '#0a84ff' };
+  if (sys >= 140 || dia >= 90) return { k: 's2', label: 'Stage 2 high', color: '#ff3b30' };
+  if (sys >= 130 || dia >= 80) return { k: 's1', label: 'Stage 1 high', color: '#ff9f0a' };
+  if (sys >= 120) return { k: 'elev', label: 'Elevated', color: '#ffcc00' };
+  return { k: 'normal', label: 'Normal', color: '#1f9d55' };
+}
+const LAB_TESTS = [['a1c', 'A1c', '%'], ['glucose', 'Fasting glucose', 'mg/dL'], ['ldl', 'LDL cholesterol', 'mg/dL'], ['hdl', 'HDL cholesterol', 'mg/dL'], ['tg', 'Triglycerides', 'mg/dL'], ['tc', 'Total cholesterol', 'mg/dL'],
+  ['egfr', 'eGFR (kidney)', 'mL/min'], ['creat', 'Creatinine', 'mg/dL'], ['k', 'Potassium', 'mmol/L'], ['na', 'Sodium', 'mmol/L'], ['alt', 'ALT (liver)', 'U/L'], ['ast', 'AST (liver)', 'U/L'], ['b12', 'Vitamin B12', 'pg/mL']];
+const LAB = Object.fromEntries(LAB_TESTS.map(([k, l, u]) => [k, { l, u }]));
+// Common reference ranges (labs vary; your report's ranges win)
+function labFlag(t, v) {
+  const R = { a1c: v >= 6.5 ? ['Diabetes range', 'bad'] : v >= 5.7 ? ['Prediabetes range', 'warn'] : ['Normal', 'ok'], glucose: v >= 126 ? ['Diabetes range', 'bad'] : v >= 100 ? ['Prediabetes range', 'warn'] : ['Normal', 'ok'],
+    ldl: v >= 160 ? ['High', 'bad'] : v >= 130 ? ['Borderline high', 'warn'] : v >= 100 ? ['Near optimal', 'ok'] : ['Optimal', 'ok'], hdl: v < 40 ? ['Low', 'warn'] : ['OK', 'ok'], tg: v >= 200 ? ['High', 'bad'] : v >= 150 ? ['Borderline high', 'warn'] : ['Normal', 'ok'],
+    tc: v >= 240 ? ['High', 'bad'] : v >= 200 ? ['Borderline', 'warn'] : ['Desirable', 'ok'], egfr: v < 60 ? ['Reduced', 'bad'] : v < 90 ? ['Mildly reduced', 'warn'] : ['Normal', 'ok'],
+    k: v > 5.0 ? ['High', 'bad'] : v < 3.5 ? ['Low', 'bad'] : ['Normal', 'ok'], na: v < 135 ? ['Low', 'bad'] : v > 145 ? ['High', 'bad'] : ['Normal', 'ok'],
+    alt: v > 55 ? ['Above typical range', 'warn'] : ['Typical', 'ok'], ast: v > 48 ? ['Above typical range', 'warn'] : ['Typical', 'ok'], b12: v < 200 ? ['Low', 'bad'] : v < 300 ? ['Borderline', 'warn'] : ['Normal', 'ok'] };
+  return R[t] || null;
+}
+const dLabel = r => r.approx ? parseD(r.date).toLocaleDateString(undefined, { month: 'short', year: 'numeric' }) : parseD(r.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+
+function openProfileSheet() {
+  const s = state.settings, conds = new Set(s.conditions || []), meds = (s.medList || []).map(m => ({ ...m }));
+  const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Health profile</div><button class="link" data-act="save">Save</button></div>
+    <p class="small muted">Used to personalize your targets, tips and recaps. Stays on this phone.</p>
+    <label class="f">Conditions</label><div class="chips wrap" id="pf-c">${CONDITIONS.map(([k, l]) => `<button class="chip ${conds.has(k) ? 'on' : ''}" data-c="${k}">${l}</button>`).join('')}</div>
+    <label class="f">Medications</label><div class="card"><ul class="list" id="pf-m"></ul><button class="btn secondary block" style="margin-top:10px" data-act="add-med">+ Add medication</button></div>
+    <p class="tiny muted">“Confirm” marks medicines you need to double-check with your doctor or pharmacy. Never start, stop or change a prescription based on this app.</p>
+    <div class="stack"><button class="btn primary big" data-act="save">Save profile</button></div>`);
+  const draw = () => {
+    $$('#pf-c .chip', el).forEach(b => b.classList.toggle('on', conds.has(b.dataset.c)));
+    $('#pf-m', el).innerHTML = meds.length ? meds.map((m, i) => `<li><button class="item" data-m="${i}"><div class="grow"><div class="t">${esc(m.name)} ${m.status === 'confirm' ? '<span class="pill warn">confirm</span>' : m.status === 'stopped' ? '<span class="pill">stopped</span>' : ''}</div>
+      <div class="s">${esc([m.dose, m.purpose].filter(Boolean).join(' · '))}</div></div></button></li>`).join('') : '<li class="small muted" style="padding:8px 0">No medications added.</li>';
+  };
+  const editMed = (i) => {
+    const m = i == null ? { name: '', dose: '', purpose: '', status: 'active' } : meds[i];
+    const sh = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">${i == null ? 'Add' : 'Edit'} medication</div><span style="width:50px"></span></div>
+      <label class="f">Name</label><input class="in" id="md-n" value="${esc(m.name)}" placeholder="e.g. Losartan / HCTZ">
+      <label class="f">Dose & schedule</label><input class="in" id="md-d" value="${esc(m.dose)}" placeholder="e.g. 100/25 mg daily">
+      <label class="f">For</label><input class="in" id="md-p" value="${esc(m.purpose)}" placeholder="e.g. Blood pressure">
+      <label class="f">Status</label><div class="seg" id="md-s">${[['active', 'Taking'], ['confirm', 'Confirm'], ['stopped', 'Stopped']].map(([v, l]) => `<button data-s="${v}" class="${m.status === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="stack"><button class="btn primary big" data-act="ok">Save</button>${i != null ? '<button class="btn danger" data-act="rm">Remove</button>' : ''}</div>`);
+    let st = m.status;
+    sh.onclick = e => {
+      const b = e.target.closest('button'); if (!b) return;
+      if (b.dataset.s) { st = b.dataset.s; $$('#md-s button', sh).forEach(x => x.classList.toggle('on', x === b)); return; }
+      if (b.dataset.act === 'close') closeSheet();
+      if (b.dataset.act === 'rm') { meds.splice(i, 1); closeSheet(); draw(); }
+      if (b.dataset.act === 'ok') { const n = $('#md-n', sh).value.trim(); if (!n) { toast('Enter a name'); return; }
+        const rec = { name: n, dose: $('#md-d', sh).value.trim(), purpose: $('#md-p', sh).value.trim(), status: st };
+        if (i == null) meds.push(rec); else meds[i] = rec; closeSheet(); draw(); }
+    };
+  };
+  draw();
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.c) { conds.has(b.dataset.c) ? conds.delete(b.dataset.c) : conds.add(b.dataset.c); draw(); return; }
+    if (b.dataset.m != null) { editMed(Number(b.dataset.m)); return; }
+    if (b.dataset.act === 'add-med') editMed(null);
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'save') { state.settings.conditions = [...conds]; state.settings.medList = meds; await DB.put('kv', state.settings); closeSheet(); toast('Profile saved'); render(); }
+  };
+}
+function openBpSheet(rec) {
+  const r = rec || { id: uid(), date: dateStr(), sys: '', dia: '', pulse: '', dizzy: false, note: '', createdAt: Date.now() };
+  const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Blood pressure</div><span style="width:50px"></span></div>
+    <div class="grid2"><div><label class="f">Top (systolic)</label><input class="in big-in" id="bp-s" type="number" inputmode="numeric" value="${r.sys}"></div>
+      <div><label class="f">Bottom (diastolic)</label><input class="in big-in" id="bp-d" type="number" inputmode="numeric" value="${r.dia}"></div>
+      <div><label class="f">Pulse (optional)</label><input class="in" id="bp-p" type="number" inputmode="numeric" value="${r.pulse ?? ''}"></div>
+      <div><label class="f">Date</label><input class="in" id="bp-dt" type="date" value="${r.date}"></div></div>
+    <label class="row small" style="gap:10px; margin-top:14px"><input type="checkbox" id="bp-z" ${r.dizzy ? 'checked' : ''} style="width:22px;height:22px"> Felt dizzy or lightheaded</label>
+    <label class="f">Note</label><input class="in" id="bp-n" value="${esc(r.note || '')}" placeholder="e.g. morning, before meds">
+    <p class="tiny muted">Sit quietly for 5 minutes, feet flat, arm supported at heart level. Morning and evening readings give the best picture.</p>
+    <div id="bp-cat"></div>
+    <div class="stack"><button class="btn primary big" data-act="ok">Save</button>${rec ? '<button class="btn danger" data-act="del">Delete</button>' : ''}</div>`);
+  const cat = () => { const s = num($('#bp-s', el).value), d = num($('#bp-d', el).value);
+    $('#bp-cat', el).innerHTML = s && d ? (() => { const c = bpCategory(s, d); return `<div class="tip" style="margin-top:12px; background:color-mix(in srgb, ${c.color} 15%, transparent)"><span class="ti">●</span><span><b>${c.label}</b>${c.k === 'crisis' ? ' — if you have chest pain, shortness of breath, vision changes, weakness or severe headache, call 911. Otherwise recheck in a few minutes and contact your doctor today.' : c.k === 'low' ? ' — especially with dizziness, let your doctor know; your BP medicines may need review as you lose weight.' : ''}</span></div>`; })() : ''; };
+  $('#bp-s', el).oninput = cat; $('#bp-d', el).oninput = cat; cat();
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'del') { if (confirm('Delete this reading?')) { await DB.del('bp', r.id); closeSheet(); render(); } }
+    if (b.dataset.act === 'ok') {
+      const s = num($('#bp-s', el).value), d = num($('#bp-d', el).value);
+      if (!(s > 60 && s < 260 && d > 30 && d < 160)) { toast('Enter both numbers'); return; }
+      Object.assign(r, { sys: s, dia: d, pulse: num($('#bp-p', el).value), date: $('#bp-dt', el).value || dateStr(), dizzy: $('#bp-z', el).checked, note: $('#bp-n', el).value.trim() });
+      await DB.put('bp', r); closeSheet(); toast('Reading saved'); render();
+    }
+  };
+}
+function openLabSheet() {
+  const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Add lab results</div><span style="width:50px"></span></div>
+    <p class="small muted">Copy from your lab report. Fill in only the tests you had.</p>
+    <label class="f">Date of the test</label><input class="in" id="lb-d" type="date" value="${dateStr()}">
+    <div class="card">${LAB_TESTS.map(([k, l, u]) => `<div class="spread" style="padding:6px 0"><span>${l} <span class="tiny muted">${u}</span></span><input class="in" data-lab="${k}" type="number" inputmode="decimal" step="any" style="width:110px; min-height:42px"></div>`).join('')}</div>
+    <div class="stack"><button class="btn primary big" data-act="ok">Save results</button></div>`);
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'close') closeSheet();
+    if (b.dataset.act === 'ok') {
+      const date = $('#lb-d', el).value || dateStr(); let n = 0;
+      for (const i of $$('[data-lab]', el)) { const v = num(i.value); if (v != null) { await DB.put('labs', { id: uid(), date, test: i.dataset.lab, value: v, createdAt: Date.now() }); n++; } }
+      if (!n) { toast('Enter at least one result'); return; }
+      closeSheet(); toast(`Saved ${n} result${n > 1 ? 's' : ''}`); render();
+    }
+  };
+}
+async function openLabHistory(test) {
+  const rows = (await DB.all('labs')).filter(r => r.test === test).sort((a, b) => a.date.localeCompare(b.date));
+  const el = openSheet(`<div class="sheet-head"><button class="link" data-act="close">Close</button><div class="sheet-title">${esc(LAB[test].l)}</div><span style="width:50px"></span></div>
+    ${rows.length > 1 ? lineChart([{ pts: rows.map(r => ({ date: r.date, v: r.value })), type: 'line', color: '#0a84ff' }, { pts: rows.map(r => ({ date: r.date, v: r.value })), type: 'dots', color: '#0a84ff' }], { h: 160, label: LAB[test].l }) : ''}
+    <div class="card"><ul class="list">${rows.slice().reverse().map(r => { const f = labFlag(test, r.value); return `<li class="spread"><div class="item" style="flex:1"><div class="grow"><div class="t">${fmt(r.value, 1)} ${esc(LAB[test].u)} ${f ? `<span class="pill ${f[1] === 'ok' ? 'ok' : 'warn'}">${f[0]}</span>` : ''}</div><div class="s">${esc(dLabel(r))}${r.note ? ' · ' + esc(r.note) : ''}</div></div></div><button class="link" style="color:var(--red)" data-del="${r.id}">Delete</button></li>`; }).join('')}</ul></div>
+    <p class="tiny muted">Ranges shown are common reference values; your lab’s report and your doctor’s targets take priority.</p>`);
+  el.onclick = async e => { const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.del) { if (confirm('Delete this result?')) { await DB.del('labs', b.dataset.del); closeSheet(); render(); } return; }
+    if (b.dataset.act === 'close') closeSheet(); };
+}
+// Personalized guidance from conditions, medications and your own data. Informational — never changes medicines.
+async function personalGuidance() {
+  const s = state.settings, out = [], today = dateStr();
+  const bp = (await DB.all('bp')).sort((a, b) => a.date.localeCompare(b.date));
+  const labs = await DB.all('labs'), latest = t => labs.filter(r => r.test === t).sort((a, b) => a.date.localeCompare(b.date)).pop();
+  const recentBp = bp.filter(r => r.date > addDays(today, -14));
+  const ws = weightStats(lastPerDay(await DB.all('weights'), 'lb'), s);
+  if (hasCond('htn') || onMed(MEDRX.bp)) {
+    const n = bpMedCount();
+    out.push({ icon: '🩺', title: 'Blood pressure & weight loss', text: `${n >= 3 ? `You take ${n} blood-pressure prescriptions. ` : ''}As you lose weight, blood pressure often falls, and medicines may need lowering. Log readings a few times a week and tell your doctor about readings under 90/60 or any dizziness or lightheadedness.${ws && ws.lost > 20 ? ` You’re down ${fmt(ws.lost, 0)} lb since you started — a good time to have your doctor review your BP medicines.` : ''}` });
+    if (recentBp.some(r => r.dizzy || r.sys < 90 || r.dia < 60)) out.push({ icon: '⚠️', title: 'Low readings or dizziness logged', kind: 'warn', text: 'You logged a low reading or dizziness in the last 2 weeks. Contact your doctor — don’t change or skip medicines on your own.' });
+    if (recentBp.length >= 3) { const as = recentBp.reduce((a, r) => a + r.sys, 0) / recentBp.length, ad = recentBp.reduce((a, r) => a + r.dia, 0) / recentBp.length;
+      if (as >= 130 || ad >= 80) out.push({ icon: '📈', title: 'Recent average above target', kind: 'warn', text: `Your 2-week average is ${fmt(as)}/${fmt(ad)}. Share your log with your doctor.` }); }
+    if (!bp.length || bp[bp.length - 1].date < addDays(today, -7)) out.push({ icon: '📝', title: 'Log your blood pressure', text: 'No reading in the last week. Home readings help your doctor adjust medicines safely as your weight changes.' });
+    out.push({ icon: '🧂', title: 'Sodium', text: `Your sodium limit is ${fmt(s.sodiumLimit)} mg/day. The American Heart Association’s ideal for high blood pressure is 1,500 mg. Restaurant and packaged foods are the main sources.` });
+  }
+  if (onMed(MEDRX.arbace)) out.push({ icon: '🚫', title: 'Avoid potassium salt substitutes', kind: 'warn', text: 'With losartan (or similar), salt substitutes like NoSalt or Morton Lite Salt contain potassium chloride and can push potassium too high. Use herbs, garlic, lemon and spices instead. Potassium-rich foods are usually fine with normal kidney function — ask your doctor.' });
+  if (onMed(MEDRX.diuretic) && onMed(MEDRX.glp1)) out.push({ icon: '💧', title: 'Hydration matters more for you', text: 'A water pill plus Wegovy’s nausea or diarrhea can dehydrate you faster. Keep up fluids, and call your doctor if you can’t keep fluids down for a day, feel faint, or urinate much less.' });
+  if (onMed(MEDRX.glp1)) out.push({ icon: '💉', title: 'Getting the most from Wegovy', text: 'Eat protein first at each meal, keep meals smaller, and go easy on greasy or very rich foods — they worsen nausea. Pair resistance training with your protein target to protect muscle.' });
+  if (onMed(MEDRX.beta)) out.push({ icon: '❤️', title: 'Exercise intensity with carvedilol', text: 'Beta blockers keep your heart rate lower, so heart-rate zones underestimate effort. Use how hard it feels instead: you should be able to talk, but not sing, during moderate exercise.' });
+  if (onMed(MEDRX.statin)) out.push({ icon: '🏋️', title: 'Starting strength training on a statin', text: 'Some soreness is normal when you start lifting. Unexplained muscle pain or weakness, especially with dark urine, should be reported to your doctor.' });
+  if (onMed(MEDRX.metformin)) out.push({ icon: '💊', title: 'Metformin', text: `Metformin and Wegovy can both upset the stomach — take metformin with food. Long-term metformin can lower vitamin B12; it’s reasonable to ask if a B12 check is due.${latest('b12') ? '' : ' (No B12 result logged.)'}` });
+  if (onMed(MEDRX.ppi) || hasCond('gerd')) out.push({ icon: '🔥', title: 'Reflux', text: 'Wegovy slows stomach emptying, which can worsen reflux. Smaller meals, finishing eating 3 hours before bed, and less fried food usually help.' });
+  if (hasCond('osa')) out.push({ icon: '😴', title: 'Sleep apnea', text: 'Use CPAP every night (it’s in your habits). Poor sleep raises hunger. As you lose weight, your CPAP pressure needs can change — mention big weight changes to your sleep doctor.' });
+  if (hasCond('prediabetes') || hasCond('t2d')) { const a = latest('a1c');
+    out.push({ icon: '🩸', title: hasCond('t2d') ? 'Blood sugar' : 'Prediabetes', text: `${a ? `Last A1c ${fmt(a.value, 1)}% (${dLabel(a)})${daysBetween(a.date, today) > 365 ? ' — over a year ago; ask about rechecking' : ''}. ` : 'No A1c logged yet. '}Pair carbs with protein and fiber, and favor whole-grain, high-fiber carbs.` }); }
+  if (hasCond('ckd')) out.push({ icon: '⚠️', title: 'Kidney disease', kind: 'warn', text: 'High-protein targets may not suit kidney disease. Your protein target is set conservatively — confirm it with your doctor or a renal dietitian.' });
+  if (hasCond('lipids')) { const l = latest('ldl'); out.push({ icon: '🫀', title: 'Cholesterol', text: `${l ? `Last LDL ${fmt(l.value)} mg/dL (${dLabel(l)}). ` : ''}Keep saturated fat under ${fmt(s.satfatLimit)} g/day and aim for your fiber goal — soluble fiber (oats, beans) helps LDL.` }); }
+  const egfr = latest('egfr'), k = latest('k');
+  if (egfr && egfr.value < 60) out.push({ icon: '⚠️', title: 'Reduced kidney function on file', kind: 'warn', text: `Your last eGFR was ${fmt(egfr.value)}. Ask your doctor whether your protein and potassium intake should be limited.` });
+  if (k && k.value > 5.0 && onMed(MEDRX.arbace)) out.push({ icon: '⚠️', title: 'High potassium on file', kind: 'warn', text: `Last potassium ${fmt(k.value, 1)} while on an ARB/ACE inhibitor — follow your doctor’s advice on potassium.` });
+  const confirm = (s.medList || []).filter(m => m.status === 'confirm');
+  if (confirm.length) out.push({ icon: '📋', title: 'Medicines to confirm', text: `Double-check with your doctor or pharmacy: ${confirm.map(m => m.name).join(', ')}.` });
+  return out;
+}
+function healthContextLines() {
+  const s = state.settings, L = [];
+  if ((s.conditions || []).length) L.push(`Conditions: ${s.conditions.map(k => COND_LABEL[k]).join(', ')}`);
+  const m = activeMeds(); if (m.length) L.push(`Medications: ${m.map(x => `${x.name}${x.dose ? ' ' + x.dose : ''}${x.status === 'confirm' ? ' (needs confirming)' : ''}`).join('; ')}`);
+  return L;
+}
+
 // ---------- Health tab ----------
 async function renderHealth() {
   const s = state.settings, today = dateStr();
@@ -1867,8 +2315,33 @@ async function renderHealth() {
   const havg = k => { const v = recentH.map(h => h[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
   const lastImp = await DB.get('kv', 'lastHealthImport');
   const hist = meds.slice(0, 12);
+  const conds = s.conditions || [], ml = s.medList || [];
+  const bpAll = (await DB.all('bp')).sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+  const bpLast = bpAll[bpAll.length - 1], bp30 = bpAll.filter(r => r.date > addDays(today, -30));
+  const labsAll = await DB.all('labs'), labLatest = {};
+  for (const r of labsAll.sort((a, b) => a.date.localeCompare(b.date))) labLatest[r.test] = r;
+  const guide = await personalGuidance();
   view().innerHTML = `
   <header class="topbar"><h1>Health</h1></header>
+  <section class="card"><div class="spread"><h2 style="margin:0">Health profile</h2><button class="link" data-act="hprofile">${conds.length || ml.length ? 'Edit' : 'Set up'}</button></div>
+    ${conds.length || ml.length ? `<div class="chips wrap" style="margin-top:10px">${conds.map(k => `<span class="chip on">${esc(COND_LABEL[k])}</span>`).join('')}</div>
+      <p class="small muted" style="margin:10px 0 0">${ml.filter(m => m.status !== 'stopped').length} medications${ml.some(m => m.status === 'confirm') ? ` · ${ml.filter(m => m.status === 'confirm').length} to confirm` : ''}</p>`
+      : '<p class="small muted">Add your conditions and medications so targets, tips and recaps fit your situation.</p>'}</section>
+  ${guide.length ? `<section class="card"><h2>Your personalized guidance</h2><ul class="tips">${guide.slice().sort((a, b) => (b.kind === 'warn') - (a.kind === 'warn')).map((g, i) => `<li class="tip ${g.kind || ''} ${i >= 4 && !state.showAllGuide ? 'hidden-tip' : ''}"><span class="ti">${g.icon}</span><span><b>${esc(g.title)}.</b> ${esc(g.text)}</span></li>`).join('')}</ul>
+    ${guide.length > 4 ? `<button class="btn block" style="margin-bottom:8px" data-act="guide-all">${state.showAllGuide ? 'Show less' : `Show all ${guide.length}`}</button>` : ''}
+    <p class="tiny muted" style="margin:0">General information based on your profile — not medical advice. Your doctor’s instructions come first.</p></section>` : ''}
+  <section class="card"><div class="spread"><h2 style="margin:0">Blood pressure</h2><button class="btn secondary" data-act="bp">+ Log</button></div>
+    ${bpLast ? (() => { const c = bpCategory(bpLast.sys, bpLast.dia); const as = bp30.length ? bp30.reduce((a, r) => a + r.sys, 0) / bp30.length : null, ad = bp30.length ? bp30.reduce((a, r) => a + r.dia, 0) / bp30.length : null;
+      return `<div class="totals" style="grid-template-columns:repeat(2,1fr); margin-top:12px"><div><div class="big" style="color:${c.color}">${bpLast.sys}/${bpLast.dia}</div><div class="lbl">latest · ${esc(c.label)} · ${esc(dLabel(bpLast))}</div></div>
+        <div><div class="big">${as ? fmt(as) + '/' + fmt(ad) : '—'}</div><div class="lbl">30-day average (${bp30.length})</div></div></div>
+        ${bpAll.length > 1 ? lineChart([{ pts: bpAll.slice(-60).map(r => ({ date: r.date, v: r.sys })), type: 'line', color: '#ff3b30' }, { pts: bpAll.slice(-60).map(r => ({ date: r.date, v: r.dia })), type: 'line', color: '#0a84ff' }], { h: 140, label: 'Blood pressure' }) + '<p class="tiny muted" style="margin:2px 0 0"><span style="color:#ff3b30">■</span> Top · <span style="color:#0a84ff">■</span> Bottom</p>' : ''}
+        <ul class="list" style="margin-top:6px">${bpAll.slice(-3).reverse().map(r => `<li><button class="item" data-bp="${r.id}"><div class="grow"><div class="t">${r.sys}/${r.dia}${r.pulse ? ` · pulse ${r.pulse}` : ''}${r.dizzy ? ' · dizzy' : ''}</div><div class="s">${esc(dLabel(r))}${r.note ? ' · ' + esc(r.note) : ''}</div></div></button></li>`).join('')}</ul>`; })()
+      : '<p class="small muted">Track home readings — useful for your doctor as your weight and medicines change.</p>'}</section>
+  <section class="card"><div class="spread"><h2 style="margin:0">Lab results</h2><button class="btn secondary" data-act="lab">+ Add</button></div>
+    ${Object.keys(labLatest).length ? `<ul class="list" style="margin-top:6px">${LAB_TESTS.filter(([k]) => labLatest[k]).map(([k, l, u]) => { const r = labLatest[k], f = labFlag(k, r.value), prev = labsAll.filter(x => x.test === k && x.date < r.date).pop();
+      return `<li><button class="item" data-labt="${k}"><div class="grow"><div class="t">${esc(l)}</div><div class="s">${esc(dLabel(r))}${prev ? ` · was ${fmt(prev.value, 1)}` : ''}</div></div>
+        <div style="text-align:right"><div class="v">${fmt(r.value, 1)} <span class="tiny muted">${esc(u)}</span></div>${f ? `<span class="pill ${f[1] === 'ok' ? 'ok' : 'warn'}">${f[0]}</span>` : ''}</div></button></li>`; }).join('')}</ul>`
+      : '<p class="small muted">A1c, cholesterol, kidney and liver tests — see trends over time.</p>'}</section>
   <section class="card"><div class="spread"><h2 style="margin:0">${esc(s.medName || 'Medication journal')}</h2><button class="link" data-act="profile">${s.medName ? 'Edit' : 'Set up'}</button></div>
     ${s.medName ? `<p class="small muted" style="margin:4px 0 8px">Prescribed: ${esc(s.medDose || '—')} · ${esc({ weekly: 'once a week', daily: 'daily', other: 'as prescribed' }[s.medSchedule || 'weekly'])}</p>` : '<p class="small muted">Add your medication and prescribed dose to start the journal.</p>'}
     ${lastDose ? `<div class="kv" style="border-top:0"><span class="muted">Last dose</span><span>${esc(lastDose.dose || '')} · ${esc(niceDate(lastDose.date))} (${since === 0 ? 'today' : since + ' day' + (since === 1 ? '' : 's') + ' ago'})</span></div>
@@ -1877,9 +2350,15 @@ async function renderHealth() {
     ${wSinceMed ? `<div class="kv"><span class="muted">Weight since starting (${esc(parseD(wSinceMed.from.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))} weigh-in)</span><span>${wSinceMed.ch <= 0 ? '−' : '+'}${fmt(Math.abs(wSinceMed.ch), 1)} lb</span></div>` : ''}
     <div class="row" style="margin-top:12px"><button class="btn primary" style="flex:1" data-act="dose">Log dose</button><button class="btn secondary" style="flex:1" data-act="symptom">How I feel</button></div>
     <p class="tiny muted" style="margin-bottom:0">For tracking and sharing with your provider. It never changes or recommends doses.</p></section>
+  ${doses.length ? (() => { const from = addDays(today, -89), lv = medLevelSeries(doses, addDays(from, -60), today).filter(p => p.date >= from);
+    return `<section class="card"><h2>Estimated medication level</h2>${lineChart([{ pts: lv, type: 'line', color: '#8e5cf7' }], { h: 150, label: 'Estimated medication level' })}
+    <p class="tiny muted" style="margin:4px 0 0">Last 90 days, in estimated mg in your body, from your logged doses. A rough illustration using semaglutide’s ~1-week half-life — not a measured blood level. Gaps in dosing show as dips; missing logged doses will too.</p></section>`; })() : ''}
+  ${symptoms.length >= 2 ? (() => { const from = addDays(today, -89), sy = symptoms.filter(x => x.date >= from);
+    return sy.length >= 2 ? `<section class="card"><h2>Side effects over time</h2>${lineChart([{ pts: sy.map(x => ({ date: x.date, v: x.nausea })), type: 'line', color: '#ff3b30' }, { pts: sy.map(x => ({ date: x.date, v: x.constipation })), type: 'line', color: '#ff9f0a' }, { pts: sy.map(x => ({ date: x.date, v: 3 - x.appetite })), type: 'dots', color: '#0a84ff' }], { h: 150, label: 'Side effects' })}
+    <p class="tiny muted" style="margin:4px 0 0"><span style="color:#ff3b30">■</span> Nausea · <span style="color:#ff9f0a">■</span> Constipation (0 none – 3 severe) · <span style="color:#0a84ff">●</span> Appetite suppression (0 more – 3 much less)</p></section>` : ''; })() : ''}
   ${hist.length ? `<section class="card"><h2>Journal</h2><ul class="list">${hist.map(m => `<li><button class="item" data-med="${m.id}"><div class="grow">
     <div class="t">${m.type === 'dose' ? '💉 ' + esc([m.med, m.dose].filter(Boolean).join(' ')) : '📝 Appetite: ' + APPETITE[m.appetite] + (m.nausea ? ' · Nausea: ' + SEVERITY[m.nausea] : '') + (m.constipation ? ' · Constipation: ' + SEVERITY[m.constipation] : '')}</div>
-    <div class="s">${esc(niceDate(m.date))}${m.site ? ' · ' + esc(m.site) : ''}${m.other ? ' · ' + esc(m.other) : ''}${m.notes ? ' · ' + esc(m.notes) : ''}</div></div></button></li>`).join('')}</ul></section>` : ''}
+    <div class="s">${esc(niceDate(m.date))}${m.other ? ' · ' + esc(m.other) : ''}${m.notes ? ' · ' + esc(m.notes) : ''}</div></div></button></li>`).join('')}</ul></section>` : ''}
   <section class="card"><div class="spread"><h2 style="margin:0">Apple Health</h2><button class="btn secondary" data-act="import">Import</button></div>
     ${recentH.length ? `<p class="small muted" style="margin:6px 0">Last 7 days of imported data (daily average):</p>
       <div class="kv" style="border-top:0"><span>Steps</span><span>${fmt(havg('steps'))}</span></div>
@@ -1892,6 +2371,12 @@ async function renderHealth() {
   view().onclick = async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.med) { const m = meds.find(x => x.id === b.dataset.med); if (m) (m.type === 'dose' ? openDoseSheet : openSymptomSheet)(m); return; }
+    if (b.dataset.bp) { const r = bpAll.find(x => x.id === b.dataset.bp); if (r) openBpSheet(r); return; }
+    if (b.dataset.labt) { openLabHistory(b.dataset.labt); return; }
+    if (b.dataset.act === 'hprofile') { openProfileSheet(); return; }
+    if (b.dataset.act === 'guide-all') { state.showAllGuide = !state.showAllGuide; render(); return; }
+    if (b.dataset.act === 'bp') { openBpSheet(); return; }
+    if (b.dataset.act === 'lab') { openLabSheet(); return; }
     const a = b.dataset.act;
     if (a === 'profile') openMedProfile();
     else if (a === 'dose') openDoseSheet();
@@ -1941,7 +2426,13 @@ ${ws ? `<p>${esc(ws.trend.text)}</p>` : ''}` : '<p class="muted">No weigh-ins in
 ${meas.length ? `<h2>Body measurements (inches)</h2><table><tr><th>Site</th><th>First</th><th>Latest</th><th>Change</th></tr>${meas.map(m => `<tr><td>${m.l}</td><td>${fmt(m.first.v, 2)} <span class="muted">(${esc(D(m.first.date))})</span></td><td>${fmt(m.last.v, 2)} <span class="muted">(${esc(D(m.last.date))})</span></td><td>${m.first.date === m.last.date ? '—' : (m.change <= 0 ? '−' : '+') + fmt(Math.abs(m.change), 2)}</td></tr>`).join('')}</table>` : ''}
 <h2>Medication</h2>
 ${s.medName ? `<p>Prescribed: <b>${esc(s.medName)}</b> ${esc(s.medDose || '')} (${esc({ weekly: 'once a week', daily: 'daily', other: 'as prescribed' }[s.medSchedule || 'weekly'])})</p>` : ''}
-${doses.length ? `<table><tr><th>Date</th><th>Medication</th><th>Dose</th><th>Site</th></tr>${doses.map(d => `<tr><td>${esc(D(d.date))}</td><td>${esc(d.med)}</td><td>${esc(d.dose)}</td><td>${esc(d.site || '')}</td></tr>`).join('')}</table>` : '<p class="muted">No doses logged in this period.</p>'}
+${doses.length ? `<table><tr><th>Date</th><th>Medication</th><th>Dose</th></tr>${doses.map(d => `<tr><td>${esc(D(d.date))}</td><td>${esc(d.med)}</td><td>${esc(d.dose)}</td></tr>`).join('')}</table>` : '<p class="muted">No doses logged in this period.</p>'}
+${(s.medList || []).length ? `<h2>Medication list (self-reported)</h2><table><tr><th>Medication</th><th>Dose</th><th>For</th><th>Status</th></tr>${s.medList.map(m => `<tr><td>${esc(m.name)}</td><td>${esc(m.dose || '')}</td><td>${esc(m.purpose || '')}</td><td>${m.status === 'confirm' ? 'Needs confirming' : m.status === 'stopped' ? 'Stopped' : 'Taking'}</td></tr>`).join('')}</table>` : ''}
+${await (async () => { const bpR = (await DB.all('bp')).filter(r => inR(r.date)).sort((a, b) => a.date.localeCompare(b.date)); if (!bpR.length) return '';
+  const as = bpR.reduce((a, r) => a + r.sys, 0) / bpR.length, ad = bpR.reduce((a, r) => a + r.dia, 0) / bpR.length;
+  return `<h2>Blood pressure</h2><p>${bpR.length} readings · average ${fmt(as)}/${fmt(ad)} mmHg · ${bpR.filter(r => r.dizzy).length} with dizziness</p><table><tr><th>Date</th><th>Reading</th><th>Pulse</th><th>Notes</th></tr>${bpR.slice(-20).map(r => `<tr><td>${esc(dLabel(r))}</td><td>${r.sys}/${r.dia}</td><td>${r.pulse ?? ''}</td><td>${r.dizzy ? 'dizzy ' : ''}${esc(r.note || '')}</td></tr>`).join('')}</table>`; })()}
+${await (async () => { const lb = (await DB.all('labs')).sort((a, b) => a.date.localeCompare(b.date)); if (!lb.length) return '';
+  return `<h2>Lab results (all on file)</h2><table><tr><th>Test</th><th>Date</th><th>Result</th></tr>${LAB_TESTS.flatMap(([k, l, u]) => lb.filter(r => r.test === k).map(r => `<tr><td>${esc(l)}</td><td>${esc(dLabel(r))}</td><td>${fmt(r.value, 1)} ${esc(u)}</td></tr>`)).join('')}</table>`; })()}
 <h2>Side effects &amp; appetite</h2>
 ${sym.length ? `<table>${row('Days with check-ins', sym.length)}${row('Average nausea (0 none – 3 severe)', fmt(symAvg('nausea'), 1))}${row('Average constipation (0 none – 3 severe)', fmt(symAvg('constipation'), 1))}${row('Days with moderate/severe nausea', sym.filter(x => x.nausea >= 2).length)}${row('Days with moderate/severe constipation', sym.filter(x => x.constipation >= 2).length)}${row('Appetite', appCounts.map(([l, n]) => `${esc(l)}: ${n}`).join(', '))}</table>` : '<p class="muted">No check-ins logged in this period.</p>'}
 ${notes.length ? `<p><b>Notes</b></p><table>${notes.map(m => `<tr><td style="white-space:nowrap">${esc(D(m.date))}</td><td>${esc([m.other, m.notes].filter(Boolean).join(' — '))}</td></tr>`).join('')}</table>` : ''}
@@ -2061,10 +2552,13 @@ function doHistoryImport() {
       for (const w of o.weights || []) if (w.date && num(w.lb) && !W.some(x => x.date === w.date && Math.abs(x.lb - w.lb) < 0.05)) { await DB.put('weights', { id: uid(), date: w.date, lb: num(w.lb), note: w.note || '', source: w.source || 'History', createdAt: Date.now() }); nw++; }
       for (const m of o.measurements || []) if (m.date && !M.some(x => x.date === m.date)) { const r = { id: uid(), date: m.date, createdAt: Date.now() }; MEASURES.forEach(([k]) => { r[k] = num(m[k]); }); await DB.put('measurements', r); nm++; }
       for (const d of o.meds || []) if (d.date && !D.some(x => x.type === (d.type || 'dose') && x.date === d.date && (x.dose || '') === (d.dose || ''))) { await DB.put('meds', { id: uid(), type: d.type || 'dose', date: d.date, med: d.med || '', dose: d.dose || '', site: d.site || '', notes: d.notes || '', nausea: d.nausea ?? 0, constipation: d.constipation ?? 0, appetite: d.appetite ?? 2, other: d.other || '', createdAt: Date.now() }); nd++; }
+      const LB = await DB.all('labs'), BP = await DB.all('bp'); let nl = 0, nb = 0;
+      for (const r of o.labs || []) if (r.date && r.test && num(r.value) != null && !LB.some(x => x.test === r.test && x.date === r.date)) { await DB.put('labs', { id: uid(), date: r.date, test: r.test, value: num(r.value), approx: !!r.approx, note: r.note || '', createdAt: Date.now() }); nl++; }
+      for (const r of o.bp || []) if (r.date && r.sys && !BP.some(x => x.date === r.date && x.sys === r.sys && x.dia === r.dia)) { await DB.put('bp', { id: uid(), date: r.date, sys: r.sys, dia: r.dia, pulse: r.pulse ?? null, approx: !!r.approx, note: r.note || '', dizzy: false, createdAt: Date.now() }); nb++; }
       let ns = 0;
       for (const [k, v] of Object.entries(o.settings || {})) if (state.settings[k] == null || state.settings[k] === '') { state.settings[k] = v; ns++; }
       if (ns) await DB.put('kv', state.settings);
-      closeAllSheets(); toast(`Added ${nw} weigh-ins, ${nm} measurement sets, ${nd} doses`, 4000); render();
+      closeAllSheets(); toast(`Added ${nw} weigh-ins, ${nm} measurements, ${nd} doses, ${nl} lab results, ${nb} BP readings`, 4500); render();
     } catch (e) { toast(e.message, 4000); }
   };
   inp.click();
@@ -2091,6 +2585,7 @@ async function openSettings() {
   const el = openSheet(`
     <div class="sheet-head"><button class="link" data-act="close">Done</button><div class="sheet-title">Settings</div><span style="width:50px"></span></div>
     <h3>Daily goals</h3>
+    <button class="btn secondary block" data-act="targets">✨ Recommend targets from my stats</button>
     <div class="grid2">${goal('kcal', 'Calories', 'kcal')}${goal('protein', 'Protein', 'g')}${goal('carbs', 'Carbs', 'g')}${goal('fat', 'Fat', 'g')}${goal('fiber', 'Fiber', 'g')}${goal('waterGoal', 'Water', 'oz')}${goal('goalWeight', 'Goal weight', 'lb')}${goal('startWeight', 'Starting weight', 'lb')}${goal('heightIn', 'Height', 'inches')}${goal('sodiumLimit', 'Sodium limit', 'mg')}${goal('satfatLimit', 'Sat. fat limit', 'g')}${goal('addedSugarLimit', 'Added sugar limit', 'g')}</div>
     <p class="tiny muted">Leave starting weight blank to use your first weigh-in.</p>
     <div class="stack"><button class="btn primary" data-act="save-goals">Save goals</button></div>
@@ -2116,6 +2611,7 @@ async function openSettings() {
     const b = e.target.closest('[data-act]'); if (!b) return;
     const a = b.dataset.act;
     if (a === 'close') closeSheet();
+    else if (a === 'targets') openTargets();
     else if (a === 'save-goals') {
       $$('[data-goal]', el).forEach(i => { const k = i.dataset.goal, v = num(i.value); if (k === 'goalWeight' || k === 'startWeight' || k === 'heightIn') state.settings[k] = v != null && v > 0 ? v : null; else if (v != null && v >= 0) state.settings[k] = v; });
       await DB.put('kv', state.settings); toast('Goals saved'); render();
@@ -2145,4 +2641,4 @@ async function init() {
 }
 
 if (typeof document !== 'undefined' && document.getElementById('view')) init();
-if (typeof module !== 'undefined') module.exports = { mapUSDA, niceName, trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
+if (typeof module !== 'undefined') module.exports = { bpCategory, labFlag, unitOptions, amountLabel, recommendTargets, checkinSuggestion, medLevelSeries, doseMg, mapUSDA, niceName, trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };

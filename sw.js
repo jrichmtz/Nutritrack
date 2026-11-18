@@ -1,5 +1,5 @@
 /* NutriTrack service worker — offline app shell. Personal data is never cached here (it lives in IndexedDB). */
-const CACHE = 'nutritrack-v4.1.0';
+const CACHE = 'nutritrack-v6.0.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 const CDN = ['https://unpkg.com/@zxing/browser@0.1/umd/zxing-browser.min.js'];
 
