@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="NutriTrack">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; connect-src 'self' https://world.openfoodfacts.org https://unpkg.com; img-src 'self' data: blob: https://images.openfoodfacts.org https://static.openfoodfacts.org https://world.openfoodfacts.org; style-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<title>NutriTrack</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<style>
+:root{
+  --bg:#f2f2f7; --card:#ffffff; --card2:#f7f7fa; --text:#111114; --muted:#6c6c72; --line:rgba(60,60,67,.14);
+  --accent:#1f9d55; --accent-ink:#ffffff; --accent-soft:rgba(31,157,85,.12);
+  --blue:#0a84ff; --orange:#ff9f0a; --red:#ff3b30; --purple:#8e5cf7; --teal:#30b0c7;
+  --warn-bg:#fff6e5; --warn-ink:#8a5300;
+  --radius:16px; --tabh:64px;
+  --safe-b:env(safe-area-inset-bottom,0px); --safe-t:env(safe-area-inset-top,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#000; --card:#1c1c1e; --card2:#2c2c2e; --text:#f5f5f7; --muted:#9a9aa0; --line:rgba(235,235,245,.14);
+    --accent:#32d17a; --accent-ink:#00230f; --accent-soft:rgba(50,209,122,.16); --warn-bg:#3a2a0a; --warn-ink:#ffcf7a; }
+}
+*{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+html,body{margin:0; background:var(--bg); color:var(--text);
+  font:17px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+body.noscroll{overflow:hidden}
+button,input,select{font:inherit; color:inherit}
+button{cursor:pointer}
+#view{padding:calc(var(--safe-t) + 12px) 16px calc(var(--tabh) + var(--safe-b) + 24px); max-width:640px; margin:0 auto; min-height:100vh}
+.topbar{display:flex; align-items:flex-end; justify-content:space-between; margin:8px 2px 14px}
+.topbar h1{font-size:32px; line-height:1.1; margin:0; letter-spacing:-.02em}
+.eyebrow{font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; font-weight:600}
+.card{background:var(--card); border-radius:var(--radius); padding:16px; margin-bottom:14px}
+.card h2{font-size:18px; margin:0 0 10px}
+.muted{color:var(--muted)} .small{font-size:14px} .tiny{font-size:12px}
+.row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+.spread{display:flex; justify-content:space-between; align-items:center; gap:10px}
+.btn{border:0; border-radius:12px; padding:13px 16px; font-weight:600; min-height:48px; background:var(--card2)}
+.btn.primary{background:var(--accent); color:var(--accent-ink)}
+.btn.secondary{background:var(--accent-soft); color:var(--accent)}
+.btn.danger{background:rgba(255,59,48,.12); color:var(--red)}
+.btn.block{width:100%; display:block}
+.btn.big{font-size:18px; min-height:54px}
+.btn:disabled{opacity:.45}
+.link{background:none; border:0; color:var(--accent); font-weight:600; padding:8px 4px; min-height:40px}
+.icon-btn{background:var(--card); border:0; width:44px; height:44px; border-radius:22px; display:grid; place-items:center; color:var(--text)}
+.icon-btn svg{width:24px; height:24px}
+/* Tab bar */
+#tabbar{position:fixed; left:0; right:0; bottom:0; height:calc(var(--tabh) + var(--safe-b)); padding-bottom:var(--safe-b);
+  display:grid; grid-template-columns:repeat(5,1fr); background:color-mix(in srgb, var(--card) 88%, transparent);
+  -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px); border-top:.5px solid var(--line); z-index:20}
+#tabbar button{background:none; border:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; font-size:11px; color:var(--muted); font-weight:600}
+#tabbar button svg{width:26px; height:26px}
+#tabbar button.active{color:var(--accent)}
+#tabbar .scan-tab .scan-bubble{width:58px; height:58px; margin-top:-26px; border-radius:29px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; box-shadow:0 6px 18px rgba(31,157,85,.35)}
+#tabbar .scan-tab .scan-bubble svg{width:30px; height:30px}
+/* Ring */
+.ring-card{display:flex; align-items:center; gap:18px}
+.ring-wrap{position:relative; width:140px; height:140px; flex:none}
+.ring{width:140px; height:140px}
+.ring-bg{fill:none; stroke:var(--card2); stroke-width:14}
+.ring-fg{fill:none; stroke:var(--accent); stroke-width:14; stroke-linecap:round; transition:stroke-dashoffset .5s}
+.ring-fg.over{stroke:var(--orange)}
+.ring-center{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center}
+.big{font-size:28px; font-weight:700; letter-spacing:-.02em; line-height:1.1}
+.lbl{font-size:13px; color:var(--muted)}
+.ring-stats{display:grid; gap:12px}
+.ring-stats div{display:flex; flex-direction:column}
+/* Macro bars */
+.bar-row{margin:10px 0}
+.bar-row .spread{font-size:15px}
+.bar{height:10px; background:var(--card2); border-radius:6px; overflow:hidden; margin-top:6px}
+.bar>i{display:block; height:100%; border-radius:6px; background:var(--c,var(--accent)); transition:width .4s}
+/* Actions */
+.actions{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px}
+.action{border:0; border-radius:var(--radius); background:var(--card); padding:16px 12px; min-height:92px; display:flex; flex-direction:column; align-items:flex-start; justify-content:space-between; font-weight:700; font-size:16px; text-align:left}
+.action svg{width:28px; height:28px; color:var(--accent)}
+.action.hero{grid-column:1/-1; background:var(--accent); color:var(--accent-ink); flex-direction:row; align-items:center; justify-content:center; gap:12px; font-size:20px; min-height:68px}
+.action.hero svg{color:var(--accent-ink); width:32px; height:32px}
+/* Chips */
+.chips{display:flex; gap:8px; overflow-x:auto; padding-bottom:4px; scrollbar-width:none}
+.chip{flex:none; border:0; background:var(--card2); border-radius:999px; padding:10px 14px; font-size:15px; font-weight:600; max-width:220px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+/* Lists */
+.list{list-style:none; margin:0; padding:0}
+.list li{border-top:.5px solid var(--line)}
+.list li:first-child{border-top:0}
+.item{display:flex; gap:12px; align-items:center; width:100%; background:none; border:0; padding:12px 0; text-align:left; min-height:56px}
+.item .grow{flex:1; min-width:0}
+.item .t{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.item .s{font-size:14px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.item .v{font-weight:600; font-variant-numeric:tabular-nums}
+.thumb{width:44px; height:44px; border-radius:10px; object-fit:cover; background:var(--card2); flex:none}
+.meal-head{display:flex; justify-content:space-between; align-items:center}
+.meal-head h2{margin:0}
+.pill{display:inline-block; font-size:12px; font-weight:700; border-radius:999px; padding:3px 8px; background:var(--card2); color:var(--muted)}
+.pill.warn{background:var(--warn-bg); color:var(--warn-ink)}
+.pill.ok{background:var(--accent-soft); color:var(--accent)}
+.warnbox{background:var(--warn-bg); color:var(--warn-ink); border-radius:12px; padding:12px 14px; font-size:15px; margin-bottom:14px}
+.totals{display:grid; grid-template-columns:repeat(5,1fr); text-align:center; gap:4px}
+.totals .big{font-size:20px}
+.datebar{display:flex; align-items:center; justify-content:space-between; margin-bottom:14px}
+.datebar button{background:var(--card); border:0; border-radius:12px; min-width:48px; height:44px; font-size:22px; font-weight:600}
+.datebar .datelabel{flex:1; margin:0 10px; font-size:17px}
+/* Scanner */
+.scanner{position:relative; background:#000; border-radius:var(--radius); overflow:hidden; aspect-ratio:3/4; max-height:56vh; width:100%; margin-bottom:12px}
+.scanner video{width:100%; height:100%; object-fit:cover; display:block}
+.scan-frame{position:absolute; left:10%; right:10%; top:36%; height:28%; border:3px solid rgba(255,255,255,.9); border-radius:14px; box-shadow:0 0 0 2000px rgba(0,0,0,.28)}
+.scan-msg{position:absolute; left:12px; right:12px; bottom:12px; text-align:center; color:#fff; background:rgba(0,0,0,.55); border-radius:10px; padding:8px 10px; font-size:15px}
+/* Forms */
+label.f{display:block; font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; margin:14px 0 6px}
+input.in, select.in{width:100%; border:0; background:var(--card2); border-radius:12px; padding:12px 14px; min-height:48px; font-size:17px}
+input.in:focus{outline:2px solid var(--accent)}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+.seg{display:flex; background:var(--card2); border-radius:12px; padding:3px; gap:3px}
+.seg button{flex:1; border:0; background:none; border-radius:10px; min-height:42px; font-weight:600; font-size:15px; color:var(--muted)}
+.seg button.on{background:var(--card); color:var(--text); box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.stepper{display:flex; gap:8px; margin-top:8px}
+.stepper button{width:56px; border:0; border-radius:12px; background:var(--card2); font-size:26px; font-weight:600}
+.stepper input{flex:1; text-align:center; font-size:22px; font-weight:700}
+.quick{display:flex; gap:8px; margin-top:8px}
+.quick button{flex:1; border:0; background:var(--card2); border-radius:10px; min-height:38px; font-weight:600; font-size:15px}
+/* Nutrition table */
+.nut{width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums}
+.nut td{padding:9px 0; border-top:.5px solid var(--line); font-size:16px}
+.nut tr:first-child td{border-top:0}
+.nut td:last-child{text-align:right; font-weight:600}
+.nut tr.main td{font-size:19px; font-weight:700}
+.nut .na{color:var(--muted); font-weight:500}
+.nutgrid{display:grid; grid-template-columns:1.3fr 1fr 1fr; gap:8px; align-items:center}
+.nutgrid .h{font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase}
+.nutgrid input{min-height:42px; padding:8px 10px; font-size:16px}
+/* Food hero */
+.food-hero{display:flex; gap:14px; align-items:center; margin:6px 0 12px}
+.food-hero img,.food-hero .ph{width:84px; height:84px; border-radius:14px; object-fit:contain; background:#fff; flex:none}
+.food-hero .ph{background:var(--card2); display:grid; place-items:center; color:var(--muted); font-size:30px}
+.food-name{font-size:20px; font-weight:700; line-height:1.2}
+.food-brand{color:var(--muted); margin-top:2px}
+.kv{display:flex; justify-content:space-between; padding:8px 0; border-top:.5px solid var(--line); font-size:15px; gap:12px}
+.kv span:last-child{text-align:right; font-weight:600}
+/* Sheets */
+#backdrop{position:fixed; inset:0; background:rgba(0,0,0,.38); z-index:30}
+.sheet{position:fixed; left:0; right:0; bottom:0; max-height:94vh; overflow-y:auto; -webkit-overflow-scrolling:touch; background:var(--bg); border-radius:18px 18px 0 0;
+  padding:6px 16px calc(var(--safe-b) + 24px); z-index:31; transform:translateY(100%); transition:transform .25s ease; max-width:680px; margin:0 auto}
+.sheet.open{transform:translateY(0)}
+.sheet-grab{width:40px; height:5px; border-radius:3px; background:var(--line); margin:4px auto 6px}
+.sheet-head{display:flex; align-items:center; justify-content:space-between; position:sticky; top:-6px; background:var(--bg); padding:4px 0 8px; z-index:2}
+.sheet-title{font-weight:700; font-size:17px}
+.sheet h3{font-size:20px; margin:22px 0 8px}
+.stack{display:grid; gap:10px; margin-top:16px}
+/* Toast */
+#toast{position:fixed; left:50%; transform:translateX(-50%); bottom:calc(var(--tabh) + var(--safe-b) + 18px); background:rgba(30,30,32,.94); color:#fff; padding:12px 18px; border-radius:14px; font-weight:600; z-index:50; max-width:90vw; text-align:center; font-size:15px}
+/* Progress bars */
+.week{display:grid; grid-template-columns:repeat(7,1fr); gap:6px; align-items:end; height:140px; position:relative; margin-top:14px}
+.week .col{display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%}
+.week-labels{display:grid; grid-template-columns:repeat(7,1fr); gap:6px; text-align:center; font-size:12px; color:var(--muted); margin-top:6px}
+.week .b{width:70%; border-radius:6px 6px 2px 2px; background:var(--accent); min-height:2px}
+.week .b.empty{background:var(--card2)}
+.goal-line{position:absolute; left:0; right:0; border-top:2px dashed var(--orange); opacity:.8}
+.status-list{margin:0; padding-left:20px} .status-list li{margin:4px 0}
+</style>
+</head>
+<body>
+<main id="view" aria-live="polite"></main>
+
+<nav id="tabbar" aria-label="Main">
+  <button data-tab="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>Home</button>
+  <button data-tab="diary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h11M9 8h6"/></svg>Diary</button>
+  <button data-tab="scan" class="scan-tab" aria-label="Scan"><span class="scan-bubble"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 8v8M10 8v8M13 8v8M16.5 8v8"/></svg></span>Scan</button>
+  <button data-tab="progress"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Progress</button>
+  <button data-tab="health"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20s-7-4.4-9-9a4.8 4.8 0 0 1 9-3 4.8 4.8 0 0 1 9 3c-2 4.6-9 9-9 9z"/></svg>Health</button>
+</nav>
+
+<div id="backdrop" hidden></div>
+<div id="toast" hidden role="status"></div>
+<input type="file" id="photo-input" accept="image/*" capture="environment" hidden>
+
+<noscript><p style="padding:20px">NutriTrack needs JavaScript turned on.</p></noscript>
+<script src="https://unpkg.com/@zxing/browser@0.1/umd/zxing-browser.min.js" crossorigin="anonymous" defer></script>
+<script src="app.js" defer></script>
+</body>
+</html>
