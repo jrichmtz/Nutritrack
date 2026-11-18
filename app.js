@@ -4,7 +4,7 @@
   Local-first PWA: all personal data lives in this device's IndexedDB.
   Only barcode numbers / search words leave the device (sent to Open Food Facts).
 */
-const APP_VERSION = '4.0.0';
+const APP_VERSION = '4.1.0';
 
 // ---------- Constants ----------
 const NUTS = [
@@ -53,6 +53,7 @@ const FEATURES = {
     'Food vs activity vs weight comparison and a shareable progress report',
     'Trend weight and estimated calorie burn (energy balance)',
     'Daily and weekly recaps with tips, plus “Ask Claude” sharing',
+    'Type-a-food search: your foods, USDA common & restaurant foods, brands, quick calories',
     'Limits for sodium, saturated fat and added sugar',
   ],
   planned: [
@@ -198,10 +199,16 @@ async function lookupOFF(code) {
   return mapOFF(code, j.product);
 }
 async function searchOFF(q) {
-  const u = `${OFF_BASE}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=20&fields=${OFF_FIELDS}`;
-  const r = await fetch(u, { headers: { Accept: 'application/json' } });
-  if (r.status === 429) throw new Error('Online search is limited to about 10 per minute. Try again shortly.');
-  if (!r.ok) throw new Error('Search failed (' + r.status + ')');
+  // Newer Open Food Facts search service first, classic search as a fallback.
+  try {
+    const r = await fetch(`https://search.openfoodfacts.org/search?q=${encodeURIComponent(q)}&page_size=15&fields=${OFF_FIELDS}`, { headers: { Accept: 'application/json' } });
+    if (r.ok) { const j = await r.json(); const hits = (j.hits || []).filter(p => p.code && p.nutriments); if (hits.length) return hits.map(p => mapOFF(p.code, p)); }
+  } catch (e) { /* fall through */ }
+  let r;
+  try { r = await fetch(`${OFF_BASE}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=15&fields=${OFF_FIELDS}`); }
+  catch (e) { throw new Error('Brand search is unavailable right now. Try scanning the barcode instead.'); }
+  if (r.status === 429) throw new Error('Brand search is limited to about 10 per minute. Try again shortly.');
+  if (!r.ok) throw new Error('Brand search failed (' + r.status + ')');
   const j = await r.json();
   return (j.products || []).filter(p => p.code).map(p => mapOFF(p.code, p));
 }
@@ -997,74 +1004,123 @@ function openEditFood(food, opts = {}) {
 // ---------- Add food (library + online search) ----------
 async function openAddFood(opts = {}) {
   const foods = await DB.all('foods');
+  const meal = opts.meal || state.pendingMeal || null;
   const el = openSheet(`
-    <div class="sheet-head"><button class="link" data-act="close">Close</button><div class="sheet-title">Add Food${opts.meal ? ' · ' + MEAL_LABEL[opts.meal] : ''}</div><span style="width:50px"></span></div>
-    <input class="in" id="af-q" type="search" placeholder="Search my foods" autocomplete="off">
-    <div class="grid2" style="margin:10px 0"><button class="btn secondary" data-act="scan">Scan barcode</button>
+    <div class="sheet-head"><button class="link" data-act="close">Close</button><div class="sheet-title">Add Food${meal ? ' · ' + MEAL_LABEL[meal] : ''}</div><span style="width:50px"></span></div>
+    <form id="af-form" autocomplete="off"><div class="searchbox">${ICON.search}<input id="af-q" type="search" enterkeyhint="search" placeholder="Type a food — egg, Cheerios, Big Mac…"></div></form>
+    <div id="af-list"></div>
+    <div class="grid2" style="margin:12px 0"><button class="btn secondary" data-act="scan">Scan barcode</button>
       <button class="btn secondary" data-act="label">Label photo</button>
       <button class="btn secondary" data-act="custom">Custom food</button>
       <button class="btn secondary" data-act="recipe">New recipe</button></div>
-    <button class="btn block" style="margin-bottom:10px" data-act="meal">Meal photo</button>
-    <div id="af-list"></div>
-    <div class="card" id="af-online-card"><button class="btn block" data-act="online">${'Search Open Food Facts online'}</button>
-      <p class="tiny muted" style="margin:8px 0 0">Online search sends your search words to Open Food Facts. Scanning a barcode is more accurate than searching by name.</p><div id="af-online"></div></div>`);
+    <button class="btn block" style="margin-bottom:10px" data-act="meal">Meal photo</button>`);
   const listEl = $('#af-list', el), q = $('#af-q', el);
-  const row = f => `<li><button class="item" data-food="${f.id}">${thumb(f.imageUrl)}<div class="grow"><div class="t">${f.favorite ? '★ ' : ''}${esc(f.name)}</div>
-    <div class="s">${esc([f.brand, f.servingLabel].filter(Boolean).join(' · '))}${f.incomplete ? ' · <span style="color:var(--orange)">incomplete</span>' : ''}</div></div></button></li>`;
+  const row = (f, tag) => `<li><button class="item" data-food="${f.id}">${thumb(f.imageUrl)}<div class="grow"><div class="t">${f.favorite ? '★ ' : ''}${esc(f.name)}</div>
+    <div class="s">${/restaurant/.test(f.source || '') ? '🍴 ' : ''}${esc([f.brand, f.servingLabel].filter(Boolean).join(' · '))}${f.incomplete ? ' · <span style="color:var(--orange)">incomplete</span>' : ''}</div></div>
+    <div class="v small">${(() => { const n = canUseServing(f) ? calcNutrients(f, 1, 'serving') : calcNutrients(f, 100, 'g'); return n.kcal == null ? '' : fmt(n.kcal) + '<span class="tiny muted"> kcal</span>'; })()}</div></button></li>`;
+  let online = { usda: null, off: null, err: {} }, lastQ = '', timer = null, pool = [];
+  const sec = (title, items, note) => `<div class="card"><div class="spread"><h2 style="margin:0">${title}</h2>${note ? `<span class="tiny muted">${note}</span>` : ''}</div><ul class="list" style="margin-top:6px">${items}</ul></div>`;
   function draw() {
     const s = q.value.trim().toLowerCase();
     let html = '';
-    if (!foods.length) html = '<div class="card small muted">No saved foods yet. Scan a barcode or create a custom food — everything you log is remembered here.</div>';
-    else if (s) {
-      const m = foods.filter(f => [f.name, f.brand, f.barcode].some(x => String(x || '').toLowerCase().includes(s)))
-        .sort((a, b) => (b.useCount || 0) - (a.useCount || 0)).slice(0, 60);
-      html = m.length ? `<div class="card"><ul class="list">${m.map(row).join('')}</ul></div>` : '<div class="card small muted">No matches in your foods. Try searching online below.</div>';
-    } else {
-      const favs = foods.filter(f => f.favorite).sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
-      const recent = foods.filter(f => f.lastUsed && !f.favorite).sort((a, b) => b.lastUsed - a.lastUsed).slice(0, 15);
-      const freq = foods.filter(f => (f.useCount || 0) >= 3 && !f.favorite).sort((a, b) => b.useCount - a.useCount).slice(0, 8);
-      const rest = foods.filter(f => !f.lastUsed && !f.favorite && !f.isRecipe).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 40);
-      const recs = foods.filter(f => f.isRecipe && !f.favorite);
-      if (recs.length) html += `<div class="card"><h2>Recipes</h2><ul class="list">${recs.map(row).join('')}</ul></div>`;
-      if (favs.length) html += `<div class="card"><h2>Favorites</h2><ul class="list">${favs.map(row).join('')}</ul></div>`;
-      if (freq.length) html += `<div class="card"><h2>Frequent</h2><ul class="list">${freq.map(row).join('')}</ul></div>`;
-      if (recent.length) html += `<div class="card"><h2>Recent</h2><ul class="list">${recent.map(row).join('')}</ul></div>`;
-      if (rest.length) html += `<div class="card"><h2>Saved, not yet logged</h2><ul class="list">${rest.map(row).join('')}</ul></div>`;
+    if (!s) {
+      if (!foods.length) html = '<div class="card small muted">Type any food above. Everything you log is remembered here for one-tap logging next time.</div>';
+      const byR = (a, b) => (b.lastUsed || 0) - (a.lastUsed || 0);
+      const favs = foods.filter(f => f.favorite).sort(byR), recs = foods.filter(f => f.isRecipe && !f.favorite);
+      const recent = foods.filter(f => f.lastUsed && !f.favorite).sort(byR).slice(0, 15);
+      if (favs.length) html += sec('Favorites', favs.map(f => row(f)).join(''));
+      if (recent.length) html += sec('Recent', recent.map(f => row(f)).join(''));
+      if (recs.length) html += sec('Recipes', recs.map(f => row(f)).join(''));
+      pool = foods; listEl.innerHTML = html; return;
     }
+    const mine = foods.filter(f => [f.name, f.brand, f.barcode].some(x => String(x || '').toLowerCase().includes(s))).sort((a, b) => (b.useCount || 0) - (a.useCount || 0)).slice(0, 20);
+    pool = [...foods, ...(online.usda || []), ...(online.off || [])];
+    if (mine.length) html += sec('My foods', mine.map(f => row(f)).join(''));
+    const st = k => online.err[k] ? `<li class="small" style="padding:10px 0; color:var(--red)">${esc(online.err[k])}</li>` : online[k] == null ? '<li class="small muted" style="padding:10px 0">Searching…</li>' : online[k].length ? online[k].map(f => row(f)).join('') : '<li class="small muted" style="padding:10px 0">No results.</li>';
+    if (s.length >= 2) {
+      html += sec('Common &amp; restaurant foods', st('usda'), 'USDA');
+      html += sec('Brands &amp; products', st('off'), 'Open Food Facts');
+    }
+    html += `<div class="card"><button class="item" data-act="quickcal"><div class="ai2">⚡</div><div class="grow"><div class="t">Quick add “${esc(q.value.trim())}”</div><div class="s">Restaurant or homemade? Type the calories — many chains post nutrition on their website</div></div></button></div>`;
     listEl.innerHTML = html;
   }
-  q.oninput = draw; draw();
-  let online = [];
+  async function runOnline(term) {
+    if (term.length < 2 || term === lastQ) return;
+    lastQ = term; online = { usda: null, off: null, err: {} }; draw();
+    if (!navigator.onLine) { online.err = { usda: 'You’re offline — showing your saved foods only.', off: ' ' }; online.usda = []; online.off = []; draw(); return; }
+    searchUSDA(term).then(r => { if (lastQ === term) { online.usda = r; draw(); } }).catch(e => { if (lastQ === term) { online.err.usda = e.message; online.usda = []; draw(); } });
+    searchOFF(term).then(r => { if (lastQ === term) { online.off = r; draw(); } }).catch(e => { if (lastQ === term) { online.err.off = e.message; online.off = []; draw(); } });
+  }
+  q.oninput = () => { clearTimeout(timer); if (!q.value.trim()) { lastQ = ''; } draw(); timer = setTimeout(() => runOnline(q.value.trim()), 700); };
+  $('#af-form', el).onsubmit = e => { e.preventDefault(); clearTimeout(timer); q.blur(); runOnline(q.value.trim()); };
+  draw();
+  setTimeout(() => q.focus(), 350);
   el.onclick = async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.food) {
-      const f = foods.find(x => x.id === b.dataset.food) || online.find(x => x.id === b.dataset.food);
-      if (!f) return;
-      if (online.includes(f)) {
-        const existing = f.barcode ? (await DB.byIndex('foods', 'barcode', f.barcode))[0] : null;
-        if (existing) { openLogSheet(existing, opts); return; }
-        await DB.put('foods', f);
+      let f = pool.find(x => x.id === b.dataset.food); if (!f) return;
+      if (!foods.includes(f)) {
+        const dup = foods.find(x => (f.fdcId && x.fdcId === f.fdcId) || (f.barcode && x.barcode === f.barcode));
+        if (dup) f = dup; else { await DB.put('foods', f); foods.push(f); }
       }
-      openLogSheet(f, opts); return;
+      openLogSheet(f, { ...opts, meal }); return;
     }
     const a = b.dataset.act;
     if (a === 'close') closeSheet();
-    else if (a === 'scan') { state.pendingMeal = opts.meal || null; closeAllSheets(); go('scan'); }
-    else if (a === 'custom') openEditFood(null, { then: f => openLogSheet(f, opts) });
-    else if (a === 'label') labelPhotoFlow({ then: f => openLogSheet(f, opts) });
-    else if (a === 'recipe') openRecipe(null, { then: f => openLogSheet(f, opts) });
-    else if (a === 'meal') { closeAllSheets(); mealPhotoFlow(opts); }
-    else if (a === 'online') {
-      const term = q.value.trim();
-      if (term.length < 2) { toast('Type a food name in the search box first'); q.focus(); return; }
-      if (!navigator.onLine) { toast('Online search needs internet'); return; }
-      const out = $('#af-online', el); out.innerHTML = '<p class="muted small">Searching…</p>';
-      try {
-        online = await searchOFF(term);
-        out.innerHTML = online.length ? `<ul class="list" style="margin-top:8px">${online.map(row).join('')}</ul>` : '<p class="muted small">No results.</p>';
-      } catch (err) { out.innerHTML = `<p class="small" style="color:var(--red)">${esc(err.message)}</p>`; }
-    }
+    else if (a === 'scan') { state.pendingMeal = meal; closeAllSheets(); go('scan'); }
+    else if (a === 'custom') openEditFood(null, { then: f => openLogSheet(f, { ...opts, meal }) });
+    else if (a === 'label') labelPhotoFlow({ then: f => openLogSheet(f, { ...opts, meal }) });
+    else if (a === 'recipe') openRecipe(null, { then: f => openLogSheet(f, { ...opts, meal }) });
+    else if (a === 'meal') { closeAllSheets(); mealPhotoFlow({ ...opts, meal }); }
+    else if (a === 'quickcal') openQuickEstimate(async it => {
+      const m = meal || defaultMeal(), d = opts.date || (state.tab === 'diary' ? state.date : dateStr());
+      await DB.put('entries', { ...it, id: uid(), date: d, meal: m, createdAt: Date.now(), updatedAt: Date.now() });
+      closeAllSheets(); toast(`Added to ${MEAL_LABEL[m]}`); render();
+    }, q.value.trim());
   };
+}
+
+// ---------- USDA FoodData Central (free, government-verified) ----------
+const USDA_N = { kcal: [1008, 2047, 2048], protein: [1003], carbs: [1005], fat: [1004], satfat: [1258], fiber: [1079], sugar: [2000, 1063], addedSugar: [1235], sodium: [1093] };
+function niceName(s) {
+  s = String(s || '').trim();
+  const letters = s.replace(/[^A-Za-z]/g, ''), upper = s.replace(/[^A-Z]/g, '');
+  if (letters.length && upper.length / letters.length > 0.7) s = s.toLowerCase().replace(/(^|[\s,(/-])([a-z])/g, (m, p, c) => p + c.toUpperCase()).replace(/\bMc([a-z])/g, (m, c) => 'Mc' + c.toUpperCase());
+  return s;
+}
+function mapUSDA(x) {
+  const per100 = emptyNuts();
+  for (const [k, ids] of Object.entries(USDA_N)) {
+    for (const id of ids) { const n = (x.foodNutrients || []).find(n => n.nutrientId === id); if (n && n.value != null) { per100[k] = n.unitName === 'kJ' ? n.value / 4.184 : n.value; break; } }
+  }
+  if (per100.sodium != null && /^g$/i.test(((x.foodNutrients || []).find(n => n.nutrientId === 1093) || {}).unitName || '')) per100.sodium *= 1000;
+  let servingGrams = null, servingLabel = '', baseUnit = 'g';
+  const meas = (x.foodMeasures || []).filter(m => m.gramWeight > 0 && !/quantity not specified/i.test(m.disseminationText || ''));
+  if (x.dataType === 'Branded' && x.servingSize && /^(g|grm|ml|mlt)$/i.test(x.servingSizeUnit || '')) {
+    servingGrams = x.servingSize; baseUnit = /^(ml|mlt)$/i.test(x.servingSizeUnit) ? 'ml' : 'g';
+    servingLabel = `${x.householdServingFullText ? x.householdServingFullText + ' ' : ''}(${fmt(servingGrams)} ${baseUnit})`;
+  } else if (meas.length) {
+    const m = meas.sort((a, b) => (a.rank || 99) - (b.rank || 99))[0];
+    servingGrams = m.gramWeight; servingLabel = `${m.disseminationText} (${fmt(m.gramWeight)} g)`;
+  }
+  const f = {
+    id: uid(), fdcId: x.fdcId, barcode: x.gtinUpc || null, name: niceName(x.description), brand: niceName(x.brandName || x.brandOwner || ''),
+    servingLabel, servingGrams, baseUnit, servingsPerContainer: null, per100: hasAny(per100) ? per100 : null, perServing: null,
+    imageUrl: '', source: /restaurant|fast food/i.test(x.foodCategory || '') ? 'USDA · restaurant' : x.dataType === 'Branded' ? 'USDA (brand)' : 'USDA', favorite: false, useCount: 0, lastUsed: 0, createdAt: Date.now(),
+  };
+  f.incomplete = isIncomplete(f);
+  return f;
+}
+async function searchUSDA(q) {
+  const key = (state.settings.usdaKey || '').trim() || 'DEMO_KEY';
+  const types = encodeURIComponent('Foundation,SR Legacy,Survey (FNDDS)');
+  const u = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=15&dataType=${types}`;
+  let r;
+  try { r = await fetch(u, { headers: { Accept: 'application/json' } }); } catch (e) { throw new Error('Couldn’t reach the USDA food database. Check your connection.'); }
+  if (r.status === 429 || r.status === 403) throw new Error(key === 'DEMO_KEY' ? 'The shared free USDA limit was reached. Get your own free key (Settings → USDA key) for unlimited everyday use.' : 'USDA key not accepted or limit reached — check it in Settings.');
+  if (!r.ok) throw new Error('USDA search failed (' + r.status + ')');
+  const j = await r.json();
+  return (j.foods || []).map(mapUSDA).filter(f => f.per100);
 }
 
 // ---------- Phase 2: label photo + OCR ----------
@@ -1345,14 +1401,16 @@ async function mealPhotoFlow(opts = {}) {
     }
   };
 }
-function openQuickEstimate(cb) {
+function openQuickEstimate(cb, prefill = '') {
   const fields = [['kcal', 'Calories', 'kcal'], ['protein', 'Protein', 'g'], ['carbs', 'Carbs', 'g'], ['fat', 'Fat', 'g'], ['fiber', 'Fiber', 'g']];
   const el = openSheet(`
     <div class="sheet-head"><button class="link" data-act="close">Cancel</button><div class="sheet-title">Quick estimate</div><span style="width:50px"></span></div>
     <p class="small muted">For foods without a label, like a restaurant dish. It’s saved and shown as an estimate. Leave anything you don’t know blank.</p>
-    <label class="f">Food *</label><input class="in" id="qe-name" placeholder="e.g. Chicken fajitas">
+    <label class="f">Food *</label><input class="in" id="qe-name" value="${esc(prefill)}" placeholder="e.g. Chicken fajitas">
     <label class="f">Portion</label><input class="in" id="qe-por" placeholder="e.g. about 1½ cups">
     <div class="grid2">${fields.map(([k, l, u]) => `<div><label class="f">${l} (${u})</label><input class="in" data-k="${k}" type="number" inputmode="decimal" step="any"></div>`).join('')}</div>
+    <label class="row small" style="gap:10px; margin-top:14px"><input type="checkbox" id="qe-save" style="width:22px;height:22px"> Save to my foods for next time (great for your regular restaurant orders)</label>
+    <p class="tiny muted">No nutrition info? Snap a photo of the meal or menu and ask Claude for an estimate, then enter it here.</p>
     <div class="stack"><button class="btn primary big" data-act="ok">Add</button></div>`);
   el.onclick = e => {
     const b = e.target.closest('button'); if (!b) return;
@@ -1362,8 +1420,10 @@ function openQuickEstimate(cb) {
       const ps = emptyNuts(); $$('[data-k]', el).forEach(i => { ps[i.dataset.k] = num(i.value); });
       const portion = $('#qe-por', el).value.trim();
       const food = { id: uid(), name, brand: '', servingLabel: portion || 'estimated portion', servingGrams: null, baseUnit: 'g', per100: null, perServing: ps, source: 'Estimate', incomplete: true };
+      const save = $('#qe-save', el).checked;
+      if (save) { food.incomplete = isIncomplete(food); food.favorite = false; food.useCount = 1; food.lastUsed = Date.now(); food.createdAt = Date.now(); DB.put('foods', food); }
       closeSheet();
-      cb({ food, foodId: null, amount: 1, unit: 'serving', baseUnit: 'g', nutrients: calcNutrients(food, 1, 'serving'), estimate: true });
+      cb({ food, foodId: save ? food.id : null, amount: 1, unit: 'serving', baseUnit: 'g', nutrients: calcNutrients(food, 1, 'serving'), estimate: true });
     }
   };
 }
@@ -2034,6 +2094,10 @@ async function openSettings() {
     <div class="grid2">${goal('kcal', 'Calories', 'kcal')}${goal('protein', 'Protein', 'g')}${goal('carbs', 'Carbs', 'g')}${goal('fat', 'Fat', 'g')}${goal('fiber', 'Fiber', 'g')}${goal('waterGoal', 'Water', 'oz')}${goal('goalWeight', 'Goal weight', 'lb')}${goal('startWeight', 'Starting weight', 'lb')}${goal('heightIn', 'Height', 'inches')}${goal('sodiumLimit', 'Sodium limit', 'mg')}${goal('satfatLimit', 'Sat. fat limit', 'g')}${goal('addedSugarLimit', 'Added sugar limit', 'g')}</div>
     <p class="tiny muted">Leave starting weight blank to use your first weigh-in.</p>
     <div class="stack"><button class="btn primary" data-act="save-goals">Save goals</button></div>
+    <h3>Food search</h3>
+    <p class="small muted">Plain-food and restaurant search uses the USDA database. It works with a shared free key; for unlimited everyday use, get your own free key at <b>api.data.gov/signup</b> (takes a minute — it’s emailed to you) and paste it here. It stays on this phone.</p>
+    <input class="in" id="usda-key" placeholder="USDA API key (optional)" value="${esc(s.usdaKey || '')}" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="stack"><button class="btn secondary" data-act="save-key">Save key</button></div>
     <h3>Backup &amp; restore</h3>
     <p class="small muted">Last backup: ${lb ? new Date(lb).toLocaleString() : 'never'}. Backups are encrypted with your passphrase (AES-256) before they leave the app. Save them to OneDrive from the share sheet, and use Restore to move your data to another device, like your Windows PC.</p>
     <div class="stack"><button class="btn secondary" data-act="backup">Create encrypted backup</button>
@@ -2055,7 +2119,8 @@ async function openSettings() {
     else if (a === 'save-goals') {
       $$('[data-goal]', el).forEach(i => { const k = i.dataset.goal, v = num(i.value); if (k === 'goalWeight' || k === 'startWeight' || k === 'heightIn') state.settings[k] = v != null && v > 0 ? v : null; else if (v != null && v >= 0) state.settings[k] = v; });
       await DB.put('kv', state.settings); toast('Goals saved'); render();
-    } else if (a === 'backup') doBackup();
+    } else if (a === 'save-key') { state.settings.usdaKey = $('#usda-key', el).value.trim(); await DB.put('kv', state.settings); toast('Key saved'); }
+    else if (a === 'backup') doBackup();
     else if (a === 'restore') doRestore();
     else if (a === 'csv') exportCSV();
     else if (a === 'history') doHistoryImport();
@@ -2080,4 +2145,4 @@ async function init() {
 }
 
 if (typeof document !== 'undefined' && document.getElementById('view')) init();
-if (typeof module !== 'undefined') module.exports = { trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };
+if (typeof module !== 'undefined') module.exports = { mapUSDA, niceName, trendSeries, weightStats, lastPerDay, makeHealthParser, avgWindow, parseLabel, recipeTotals, calcNutrients, mapOFF, upcEtoA, barcodeCandidates, isIncomplete, canUseServing, canUseGrams, sumNuts, missingLabels };

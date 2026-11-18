@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="NutriTrack">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self' data: blob: https://world.openfoodfacts.org https://unpkg.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; img-src 'self' data: blob: https://images.openfoodfacts.org https://static.openfoodfacts.org https://world.openfoodfacts.org; style-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:; worker-src 'self' blob: https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self' data: blob: https://world.openfoodfacts.org https://*.openfoodfacts.org https://api.nal.usda.gov https://unpkg.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; img-src 'self' data: blob: https://images.openfoodfacts.org https://static.openfoodfacts.org https://world.openfoodfacts.org; style-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:; worker-src 'self' blob: https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self'; form-action 'none'">
 <title>NutriTrack</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -216,6 +216,10 @@ input.in:focus{outline:2px solid var(--accent)}
 .m-breakfast{--mc:#ff9f0a} .m-lunch{--mc:#1f9d55} .m-dinner{--mc:#0a84ff} .m-snacks{--mc:#8e5cf7}
 .meal-ic{margin-right:8px}
 .btn{border-radius:14px}
+.searchbox{display:flex; align-items:center; gap:10px; background:var(--card); border-radius:16px; padding:0 14px; box-shadow:var(--shadow)}
+.searchbox svg{width:20px; height:20px; color:var(--muted); flex:none}
+.searchbox input{flex:1; border:0; background:none; min-height:52px; font-size:17px; outline:none}
+.ai2{width:44px; height:44px; border-radius:12px; display:grid; place-items:center; background:var(--accent-soft); font-size:20px; flex:none}
 </style>
 </head>
 <body>
